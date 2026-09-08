@@ -14,8 +14,9 @@
 #include <variant>
 #include <vector>
 
-#include <VapourSynth.h>
-#include <VSHelper.h>
+#include <VapourSynth4.h>
+#include <VSHelper4.h>
+#include <VSConstants4.h>
 
 #include <onnx/common/version.h>
 #include <onnx/onnx_pb.h>
@@ -67,7 +68,7 @@ static int numPlanes(
     int num_planes = 0;
 
     for (const auto & vi : vis) {
-        num_planes += vi->format->numPlanes;
+        num_planes += vi->format.numPlanes;
     }
 
     return num_planes;
@@ -80,7 +81,7 @@ static std::optional<std::string> checkNodes(
 ) {
 
     for (const auto & vi : vis) {
-        if (vi->format->sampleType != stFloat || vi->format->bitsPerSample != 32) {
+        if (vi->format.sampleType != stFloat || vi->format.bitsPerSample != 32) {
             return "expects clip with type fp32";
         }
 
@@ -92,7 +93,7 @@ static std::optional<std::string> checkNodes(
             return "number of frames mismatch";
         }
 
-        if (vi->format->subSamplingH != 0 || vi->format->subSamplingW != 0) {
+        if (vi->format.subSamplingH != 0 || vi->format.subSamplingW != 0) {
             return "clip must not be sub-sampled";
         }
     }
@@ -190,7 +191,6 @@ static std::optional<std::string> checkNodesAndNetwork(
 }
 
 
-
 static void setDimensions(
     std::unique_ptr<VSVideoInfo> & vi,
     const ov::CompiledModel & network,
@@ -206,15 +206,15 @@ static void setDimensions(
     vi->width *= out_dims[3] / in_dims[3];
 
     if (out_dims[1] == 1 || flexible_output) {
-        vi->format = vsapi->registerFormat(cmGray, stFloat, 32, 0, 0, core);
+        vsapi->queryVideoFormat(&vi->format, cfGray, stFloat, 32, 0, 0, core);
     } else if (out_dims[1] == 3) {
-        vi->format = vsapi->registerFormat(cmRGB, stFloat, 32, 0, 0, core);
+        vsapi->queryVideoFormat(&vi->format, cfRGB, stFloat, 32, 0, 0, core);
     }
 }
 
 
 static std::variant<std::string, ov::AnyMap> getConfig(
-    VSFuncRef * config_func,
+    VSFunction * config_func,
     VSCore * core,
     const VSAPI * vsapi
 ) {
@@ -234,28 +234,28 @@ static std::variant<std::string, ov::AnyMap> getConfig(
         return error_message;
     };
 
-    vsapi->callFunc(config_func, in_map, out_map, core, vsapi);
+    vsapi->callFunction(config_func, in_map, out_map);
 
-    if (auto error_message = vsapi->getError(out_map); error_message) {
+    if (auto error_message = vsapi->mapGetError(out_map); error_message) {
         return set_error(error_message);
     }
 
-    int num_keys { vsapi->propNumKeys(out_map) };
+    int num_keys { vsapi->mapNumKeys(out_map) };
     for (int index = 0; index < num_keys; index++) {
-        auto key = vsapi->propGetKey(out_map, index);
-        auto num_elements { vsapi->propNumElements(out_map, key) };
+        auto key = vsapi->mapGetKey(out_map, index);
+        auto num_elements { vsapi->mapNumElements(out_map, key) };
         if (num_elements != 1) {
             return set_error("each value in the \"config\" dict must have exactly one element");
         }
-        auto type = vsapi->propGetType(out_map, key);
+        auto type = vsapi->mapGetType(out_map, key);
         if (type == ptData) {
-            config[key] = vsapi->propGetData(out_map, key, 0, nullptr);
+            config[key] = vsapi->mapGetData(out_map, key, 0, nullptr);
         } else if (type == ptInt) {
-            config[key] = std::to_string(vsapi->propGetInt(out_map, key, 0, nullptr));
+            config[key] = std::to_string(vsapi->mapGetInt(out_map, key, 0, nullptr));
         } else if (type == ptFloat) {
-            config[key] = std::to_string(vsapi->propGetFloat(out_map, key, 0, nullptr));
+            config[key] = std::to_string(vsapi->mapGetFloat(out_map, key, 0, nullptr));
         } else {
-            return set_error("unknown type of key \""s + key + "\": (" + type + ")");
+            return set_error("unknown type of key \""s + key + "\": (" + std::to_string(type) + ")");
         }
     }
 
@@ -267,7 +267,7 @@ static std::variant<std::string, ov::AnyMap> getConfig(
 
 
 struct OVData {
-    std::vector<VSNodeRef *> nodes;
+    std::vector<VSNode *> nodes;
     std::unique_ptr<VSVideoInfo> out_vi;
 
     int overlap_w, overlap_h;
@@ -281,31 +281,17 @@ struct OVData {
 };
 
 
-static void VS_CC vsOvInit(
-    VSMap *in,
-    VSMap *out,
-    void **instanceData,
-    VSNode *node,
-    VSCore *core,
-    const VSAPI *vsapi
-) {
-
-    OVData * d = static_cast<OVData *>(*instanceData);
-    vsapi->setVideoInfo(d->out_vi.get(), 1, node);
-}
-
-
-static const VSFrameRef *VS_CC vsOvGetFrame(
+static const VSFrame *VS_CC vsOvGetFrame(
     int n,
     int activationReason,
-    void **instanceData,
+    void *instanceData,
     void **frameData,
     VSFrameContext *frameCtx,
     VSCore *core,
     const VSAPI *vsapi
-) {
+) noexcept {
 
-    OVData * d = static_cast<OVData *>(*instanceData);
+    auto *d = static_cast<OVData *>(instanceData);
 
     if (activationReason == arInitial) {
         for (const auto & node : d->nodes) {
@@ -318,7 +304,7 @@ static const VSFrameRef *VS_CC vsOvGetFrame(
             in_vis.emplace_back(vsapi->getVideoInfo(node));
         }
 
-        std::vector<const VSFrameRef *> src_frames;
+        std::vector<const VSFrame *> src_frames;
         src_frames.reserve(std::size(d->nodes));
         for (const auto & node : d->nodes) {
             src_frames.emplace_back(vsapi->getFrameFilter(n, node, frameCtx));
@@ -327,7 +313,7 @@ static const VSFrameRef *VS_CC vsOvGetFrame(
         auto src_stride = vsapi->getStride(src_frames.front(), 0);
         auto src_width = vsapi->getFrameWidth(src_frames.front(), 0);
         auto src_height = vsapi->getFrameHeight(src_frames.front(), 0);
-        auto src_bytes = vsapi->getFrameFormat(src_frames.front())->bytesPerSample;
+        auto src_bytes = vsapi->getVideoFrameFormat(src_frames.front())->bytesPerSample;
         auto src_tile_shape = getShape(d->executable_network, true);
         auto src_tile_h = src_tile_shape[2];
         auto src_tile_w = src_tile_shape[3];
@@ -337,7 +323,7 @@ static const VSFrameRef *VS_CC vsOvGetFrame(
         std::vector<const uint8_t *> src_ptrs;
         src_ptrs.reserve(src_tile_shape[1]);
         for (unsigned i = 0; i < std::size(d->nodes); ++i) {
-            for (int j = 0; j < in_vis[i]->format->numPlanes; ++j) {
+            for (int j = 0; j < in_vis[i]->format.numPlanes; ++j) {
                 src_ptrs.emplace_back(vsapi->getReadPtr(src_frames[i], j));
             }
         }
@@ -345,15 +331,15 @@ static const VSFrameRef *VS_CC vsOvGetFrame(
         auto step_w = src_tile_w - 2 * d->overlap_w;
         auto step_h = src_tile_h - 2 * d->overlap_h;
 
-        VSFrameRef * const dst_frame = vsapi->newVideoFrame(
-            d->out_vi->format, d->out_vi->width, d->out_vi->height,
+        VSFrame * const dst_frame = vsapi->newVideoFrame(
+            &d->out_vi->format, d->out_vi->width, d->out_vi->height,
             src_frames.front(), core
         );
 
-        std::vector<VSFrameRef *> dst_frames;
+        std::vector<VSFrame *> dst_frames;
 
         auto dst_stride = vsapi->getStride(dst_frame, 0);
-        auto dst_bytes = vsapi->getFrameFormat(dst_frame)->bytesPerSample;
+        auto dst_bytes = vsapi->getVideoFrameFormat(dst_frame)->bytesPerSample;
         auto dst_tile_shape = getShape(d->executable_network, false);
         auto dst_tile_h = dst_tile_shape[2];
         auto dst_tile_w = dst_tile_shape[3];
@@ -369,7 +355,7 @@ static const VSFrameRef *VS_CC vsOvGetFrame(
         } else {
             for (int i = 0; i < dst_planes; ++i) {
                 auto frame { vsapi->newVideoFrame(
-                    d->out_vi->format, d->out_vi->width, d->out_vi->height,
+                    &d->out_vi->format, d->out_vi->width, d->out_vi->height,
                     src_frames[0], core
                 )};
                 dst_frames.emplace_back(frame);
@@ -441,7 +427,7 @@ static const VSFrameRef *VS_CC vsOvGetFrame(
                             y * src_stride + x * src_bytes
                         };
 
-                        vs_bitblt(
+                        vsh::bitblt(
                             input_buffer, src_tile_w_bytes,
                             src_ptr, src_stride,
                             src_tile_w_bytes, src_tile_h
@@ -467,7 +453,7 @@ static const VSFrameRef *VS_CC vsOvGetFrame(
                             h_scale * y * dst_stride + w_scale * x * dst_bytes
                         );
 
-                        vs_bitblt(
+                        vsh::bitblt(
                             dst_ptr + (y_crop_start * dst_stride + x_crop_start * dst_bytes),
                             dst_stride,
                             output_buffer + (y_crop_start * dst_tile_w_bytes + x_crop_start * dst_bytes),
@@ -499,11 +485,11 @@ static const VSFrameRef *VS_CC vsOvGetFrame(
         }
 
         if (!d->flexible_output_prop.empty()) {
-            auto prop = vsapi->getFramePropsRW(dst_frame);
+            auto prop = vsapi->getFramePropertiesRW(dst_frame);
 
             for (int i = 0; i < dst_planes; i++) {
                 auto key { d->flexible_output_prop + std::to_string(i) };
-                vsapi->propSetFrame(prop, key.c_str(), dst_frames[i], paReplace);
+                vsapi->mapSetFrame(prop, key.c_str(), dst_frames[i], maReplace);
                 vsapi->freeFrame(dst_frames[i]);
             }
         }
@@ -519,7 +505,7 @@ static void VS_CC vsOvFree(
     void *instanceData,
     VSCore *core,
     const VSAPI *vsapi
-) {
+) noexcept {
 
     OVData * d = static_cast<OVData *>(instanceData);
 
@@ -544,21 +530,21 @@ static void VS_CC vsOvCreate(
     try {
         d = std::make_unique<OVData>();
     } catch (const ov::Exception& e) {
-        vsapi->setError(out, ("[OV exception] Initialize inference engine: "s + e.what()).c_str());
+        vsapi->mapSetError(out, ("[OV exception] Initialize inference engine: "s + e.what()).c_str());
         return ;
     } catch (const std::exception& e) {
-        vsapi->setError(out, ("[Standard exception] Initialize inference engine: "s + e.what()).c_str());
+        vsapi->mapSetError(out, ("[Standard exception] Initialize inference engine: "s + e.what()).c_str());
         return ;
     }
 
-    int num_nodes = vsapi->propNumElements(in, "clips");
+    int num_nodes = vsapi->mapNumElements(in, "clips");
     d->nodes.reserve(num_nodes);
     for (int i = 0; i < num_nodes; ++i) {
-        d->nodes.emplace_back(vsapi->propGetNode(in, "clips", i, nullptr));
+        d->nodes.emplace_back(vsapi->mapGetNode(in, "clips", i, nullptr));
     }
 
     const auto set_error = [&](const std::string & error_message) {
-        vsapi->setError(out, (__func__ + ": "s + error_message).c_str());
+        vsapi->mapSetError(out, (__func__ + ": "s + error_message).c_str());
         for (const auto & node : d->nodes) {
             vsapi->freeNode(node);
         }
@@ -578,14 +564,14 @@ static void VS_CC vsOvCreate(
 
     int error;
 
-    const char * device = vsapi->propGetData(in, "device", 0, &error);
+    const char * device = vsapi->mapGetData(in, "device", 0, &error);
     if (error) {
         device = "CPU";
     }
 
     int error1, error2;
-    d->overlap_w = int64ToIntS(vsapi->propGetInt(in, "overlap", 0, &error1));
-    d->overlap_h = int64ToIntS(vsapi->propGetInt(in, "overlap", 1, &error2));
+    d->overlap_w = vsapi->mapGetIntSaturated(in, "overlap", 0, &error1);
+    d->overlap_h = vsapi->mapGetIntSaturated(in, "overlap", 1, &error2);
     if (!error1) {
         if (error2) {
             d->overlap_h = d->overlap_w;
@@ -599,8 +585,8 @@ static void VS_CC vsOvCreate(
         d->overlap_h = 0;
     }
 
-    int tile_w = int64ToIntS(vsapi->propGetInt(in, "tilesize", 0, &error1));
-    int tile_h = int64ToIntS(vsapi->propGetInt(in, "tilesize", 1, &error2));
+    int tile_w = vsapi->mapGetIntSaturated(in, "tilesize", 0, &error1);
+    int tile_h = vsapi->mapGetIntSaturated(in, "tilesize", 1, &error2);
     if (!error1) { // manual specification triggered
         if (error2) {
             tile_h = tile_w;
@@ -618,12 +604,12 @@ static void VS_CC vsOvCreate(
         return set_error("\"overlap\" too large");
     }
 
-    bool fp16 = !!vsapi->propGetInt(in, "fp16", 0, &error);
+    bool fp16 = !!vsapi->mapGetInt(in, "fp16", 0, &error);
     if (error) {
         fp16 = false;
     }
 
-    bool path_is_serialization = !!vsapi->propGetInt(in, "path_is_serialization", 0, &error);
+    bool path_is_serialization = !!vsapi->mapGetInt(in, "path_is_serialization", 0, &error);
     if (error) {
         path_is_serialization = false;
     }
@@ -632,14 +618,14 @@ static void VS_CC vsOvCreate(
     std::string path;
     if (path_is_serialization) {
         path_view = {
-            vsapi->propGetData(in, "network_path", 0, nullptr),
-            static_cast<size_t>(vsapi->propGetDataSize(in, "network_path", 0, nullptr))
+            vsapi->mapGetData(in, "network_path", 0, nullptr),
+            static_cast<size_t>(vsapi->mapGetDataSize(in, "network_path", 0, nullptr))
         };
     } else {
-        path = vsapi->propGetData(in, "network_path", 0, nullptr);
-        bool builtin = !!vsapi->propGetInt(in, "builtin", 0, &error);
+        path = vsapi->mapGetData(in, "network_path", 0, nullptr);
+        bool builtin = !!vsapi->mapGetInt(in, "builtin", 0, &error);
         if (builtin) {
-            const char *modeldir = vsapi->propGetData(in, "builtindir", 0, &error);
+            const char *modeldir = vsapi->mapGetData(in, "builtindir", 0, &error);
             if (!modeldir) modeldir = "models";
             path = std::string(modeldir) + "/" + path;
             std::string dir { vsapi->getPluginPath(myself) };
@@ -649,7 +635,7 @@ static void VS_CC vsOvCreate(
         path_view = path;
     }
 
-    auto flexible_output_prop = vsapi->propGetData(in, "flexible_output_prop", 0, &error);
+    auto flexible_output_prop = vsapi->mapGetData(in, "flexible_output_prop", 0, &error);
     if (!error) {
         d->flexible_output_prop = flexible_output_prop;
     }
@@ -663,7 +649,7 @@ static void VS_CC vsOvCreate(
 
     if (fp16) {
         std::unordered_set<std::string> fp16_blacklist_ops;
-        int num = vsapi->propNumElements(in, "fp16_blacklist_ops");
+        int num = vsapi->mapNumElements(in, "fp16_blacklist_ops");
         if (num == -1) {
             fp16_blacklist_ops = {
                 "ArrayFeatureExtractor", "Binarizer", "CastMap", "CategoryMapper",
@@ -675,7 +661,7 @@ static void VS_CC vsOvCreate(
             };
         } else {
             for (int i = 0; i < num; i++) {
-                fp16_blacklist_ops.emplace(vsapi->propGetData(in, "fp16_blacklist_ops", i, nullptr));
+                fp16_blacklist_ops.emplace(vsapi->mapGetData(in, "fp16_blacklist_ops", i, nullptr));
             }
         }
         convert_float_to_float16(onnx_model, false, fp16_blacklist_ops);
@@ -707,7 +693,7 @@ static void VS_CC vsOvCreate(
         }
 
 #ifdef ENABLE_VISUALIZATION
-        const char * dot_path = vsapi->propGetData(in, "dot_path", 0, &error);
+        const char * dot_path = vsapi->mapGetData(in, "dot_path", 0, &error);
         if (!error) {
             try {
                 ov::pass::VisualizeTree(dot_path, nullptr, true).run_on_model(network);
@@ -717,9 +703,9 @@ static void VS_CC vsOvCreate(
         }
 #endif // ENABLE_VISUALIZATION
 
-        auto config_func = vsapi->propGetFunc(in, "config", 0, &error);
+        auto config_func = vsapi->mapGetFunction(in, "config", 0, &error);
         auto config_ret = getConfig(config_func, core, vsapi);
-        vsapi->freeFunc(config_func);
+        vsapi->freeFunction(config_func);
         if (std::holds_alternative<std::string>(config_ret)) {
             return set_error(std::get<std::string>(config_ret));
         }
@@ -738,37 +724,58 @@ static void VS_CC vsOvCreate(
         setDimensions(d->out_vi, d->executable_network, core, vsapi, !d->flexible_output_prop.empty());
 
         VSCoreInfo core_info;
-        vsapi->getCoreInfo2(core, &core_info);
+        vsapi->getCoreInfo(core, &core_info);
         d->infer_requests.reserve(core_info.numThreads);
     }
 
     if (!d->flexible_output_prop.empty()) {
         auto num_planes = d->executable_network.output(0).get_shape()[1];
-        vsapi->propSetInt(out, "num_planes", static_cast<int>(num_planes), paReplace);
+        vsapi->mapSetInt(out, "num_planes", static_cast<int>(num_planes), maReplace);
     }
 
-    vsapi->createFilter(
-        in, out, "Model",
-        vsOvInit, vsOvGetFrame, vsOvFree,
-        fmParallel, 0, d.release(), core
+    std::vector<VSFilterDependency> deps;
+    deps.reserve(d->nodes.size());
+    for (auto *node : d->nodes) {
+        deps.push_back({node, rpGeneral});
+    }
+
+    auto *out_vi = d->out_vi.get();
+    auto *instance_data = d.release();
+
+    vsapi->createVideoFilter(
+        out,
+        "Model",
+        out_vi,
+        vsOvGetFrame,
+        vsOvFree,
+        fmParallel,
+        deps.data(),
+        static_cast<int>(deps.size()),
+        instance_data,
+        core
     );
 }
 
 
-VS_EXTERNAL_API(void) VapourSynthPluginInit(
-    VSConfigPlugin configFunc,
-    VSRegisterFunction registerFunc,
-    VSPlugin *plugin
+VS_EXTERNAL_API(void) VapourSynthPluginInit2(
+    VSPlugin *plugin,
+    const VSPLUGINAPI *vspapi
 ) {
     myself = plugin;
 
-    configFunc(
-        "io.github.amusementclub.vs_openvino", "ov", "OpenVINO ML Filter Runtime",
-        VAPOURSYNTH_API_VERSION, 1, plugin
+    vspapi->configPlugin(
+        "io.github.amusementclub.vs_openvino",
+        "ov",
+        "OpenVINO ML Filter Runtime",
+        VS_MAKE_VERSION(1, 0),
+        VAPOURSYNTH_API_VERSION,
+        0,
+        plugin
     );
 
-    registerFunc("Model",
-        "clips:clip[];"
+    vspapi->registerFunction(
+        "Model",
+        "clips:vnode[];"
         "network_path:data;"
         "overlap:int[]:opt;"
         "tilesize:int[]:opt;"
@@ -782,46 +789,47 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit(
 #ifdef ENABLE_VISUALIZATION
         "dot_path:data:opt;"
 #endif
-        "flexible_output_prop:data:opt;"
-        , vsOvCreate,
+        "flexible_output_prop:data:opt;",
+        "clip:vnode;",
+        vsOvCreate,
         nullptr,
         plugin
     );
 
     auto getVersion = [](const VSMap *, VSMap * out, void *, VSCore *, const VSAPI *vsapi) {
-        vsapi->propSetData(out, "version", VERSION, -1, paReplace);
+        vsapi->mapSetData(out, "version", VERSION, -1, dtUtf8, maReplace);
 
         std::ostringstream ostream;
         ostream << OPENVINO_VERSION_MAJOR << '.' << OPENVINO_VERSION_MINOR << '.' << OPENVINO_VERSION_PATCH;
-        vsapi->propSetData(out, "openvino_version_build", ostream.str().c_str(), -1, paReplace);
+        vsapi->mapSetData(out, "openvino_version_build", ostream.str().c_str(), -1, dtUtf8, maReplace);
 
-        vsapi->propSetData(out, "openvino_version", ov::get_openvino_version().buildNumber, -1, paReplace);
+        vsapi->mapSetData(out, "openvino_version", ov::get_openvino_version().buildNumber, -1, dtUtf8, maReplace);
 
-        vsapi->propSetData(
+        vsapi->mapSetData(
             out, "onnx_version",
-            ONNX_NAMESPACE::LAST_RELEASE_VERSION, -1, paReplace
+            ONNX_NAMESPACE::LAST_RELEASE_VERSION, -1, dtUtf8, maReplace
         );
 
 #ifdef ENABLE_VISUALIZATION
-        vsapi->propSetInt(out, "enable_visualization", 1, paReplace);
+        vsapi->mapSetInt(out, "enable_visualization", 1, maReplace);
 #endif // ENABLE_VISUALIZATION
 
-        vsapi->propSetData(out, "path", vsapi->getPluginPath(myself), -1, paReplace);
+        vsapi->mapSetData(out, "path", vsapi->getPluginPath(myself), -1, dtUtf8, maReplace);
     };
-    registerFunc("Version", "", getVersion, nullptr, plugin);
+    vspapi->registerFunction("Version", "", "any", getVersion, nullptr, plugin);
 
     auto availableDevices = [](const VSMap *, VSMap * out, void *, VSCore *, const VSAPI *vsapi) {
         try {
             auto core = ov::Core();
             auto devices = core.get_available_devices();
             for (const auto & device : devices) {
-                vsapi->propSetData(out, "devices", device.c_str(), -1, paAppend);
+                vsapi->mapSetData(out, "devices", device.c_str(), -1, dtUtf8, maAppend);
             }
         } catch (const ov::Exception& e) {
-            vsapi->setError(out, ("[OV exception] Initialize inference engine: "s + e.what()).c_str());
+            vsapi->mapSetError(out, ("[OV exception] Initialize inference engine: "s + e.what()).c_str());
         } catch (const std::exception& e) {
-            vsapi->setError(out, ("[Standard exception] Initialize inference engine: "s + e.what()).c_str());
+            vsapi->mapSetError(out, ("[Standard exception] Initialize inference engine: "s + e.what()).c_str());
         }
     };
-    registerFunc("AvailableDevices", "", availableDevices, nullptr, plugin);
+    vspapi->registerFunction("AvailableDevices", "", "any", availableDevices, nullptr, plugin);
 }
