@@ -22,7 +22,15 @@
 #include <NvInferPlugin.h>
 #endif
 
-#include "config.h"
+#ifndef PLUGIN_VERSION_MAJOR
+#define PLUGIN_VERSION_MAJOR 1
+#endif
+#ifndef PLUGIN_VERSION_MINOR
+#define PLUGIN_VERSION_MINOR 0
+#endif
+#ifndef PLUGIN_VERSION_STRING
+#define PLUGIN_VERSION_STRING "unknown"
+#endif
 #include "inference_helper.h"
 #include "trt_utils.h"
 #include "utils.h"
@@ -637,7 +645,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
         "trt",
         "TensorRT ML Filter Runtime",
 #endif
-        VS_MAKE_VERSION(1, 0),
+        VS_MAKE_VERSION(PLUGIN_VERSION_MAJOR, PLUGIN_VERSION_MINOR),
         VAPOURSYNTH_API_VERSION,
         0,
         plugin
@@ -710,7 +718,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
     );
 
     auto getVersion = [](const VSMap *, VSMap * out, void *, VSCore * core, const VSAPI *vsapi) {
-        vsapi->mapSetData(out, "version", VERSION, -1, dtUtf8, maReplace);
+        vsapi->mapSetData(out, "version", PLUGIN_VERSION_STRING, -1, dtUtf8, maReplace);
 
         vsapi->mapSetData(
             out, "tensorrt_version",

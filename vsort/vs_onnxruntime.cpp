@@ -39,7 +39,15 @@ using namespace std::chrono_literals;
 #include "../common/convert_float_to_float16.h"
 #include "../common/onnx_utils.h"
 
-#include "config.h"
+#ifndef PLUGIN_VERSION_MAJOR
+#define PLUGIN_VERSION_MAJOR 1
+#endif
+#ifndef PLUGIN_VERSION_MINOR
+#define PLUGIN_VERSION_MINOR 0
+#endif
+#ifndef PLUGIN_VERSION_STRING
+#define PLUGIN_VERSION_STRING "unknown"
+#endif
 
 
 #ifdef ENABLE_COREML
@@ -1423,7 +1431,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
         PLUGIN_ID,
         "ort",
         "ONNX Runtime ML Filter Runtime",
-        VS_MAKE_VERSION(1, 0),
+        VS_MAKE_VERSION(PLUGIN_VERSION_MAJOR, PLUGIN_VERSION_MINOR),
         VAPOURSYNTH_API_VERSION,
         0,
         plugin
@@ -1459,7 +1467,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
     );
 
     auto getVersion = [](const VSMap *, VSMap * out, void *, VSCore * core, const VSAPI *vsapi) {
-        vsapi->mapSetData(out, "version", VERSION, -1, dtUtf8, maReplace);
+        vsapi->mapSetData(out, "version", PLUGIN_VERSION_STRING, -1, dtUtf8, maReplace);
         vsapi->mapSetData(out, "onnxruntime_api_version_build", std::to_string(ORT_API_VERSION).c_str(), -1, dtUtf8, maReplace);
 
         if (auto err = ortInit(); err.has_value()) {

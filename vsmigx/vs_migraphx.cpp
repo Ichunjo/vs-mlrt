@@ -26,7 +26,15 @@
 #define NO_MIGX_VERSION
 #endif
 
-#include "config.h"
+#ifndef PLUGIN_VERSION_MAJOR
+#define PLUGIN_VERSION_MAJOR 1
+#endif
+#ifndef PLUGIN_VERSION_MINOR
+#define PLUGIN_VERSION_MINOR 0
+#endif
+#ifndef PLUGIN_VERSION_STRING
+#define PLUGIN_VERSION_STRING "unknown"
+#endif
 
 using namespace std::string_literals;
 
@@ -1004,7 +1012,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
         PLUGIN_ID,
         "migx",
         "MIGraphX ML Filter Runtime",
-        VS_MAKE_VERSION(1, 0),
+        VS_MAKE_VERSION(PLUGIN_VERSION_MAJOR, PLUGIN_VERSION_MINOR),
         VAPOURSYNTH_API_VERSION,
         0,
         plugin
@@ -1026,7 +1034,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
     );
 
     auto getVersion = [](const VSMap *, VSMap * out, void *, VSCore * core, const VSAPI *vsapi) {
-        vsapi->mapSetData(out, "version", VERSION, -1, dtUtf8, maReplace);
+        vsapi->mapSetData(out, "version", PLUGIN_VERSION_STRING, -1, dtUtf8, maReplace);
 
 #ifndef NO_MIGX_VERSION
         vsapi->mapSetData(
