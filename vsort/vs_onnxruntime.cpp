@@ -66,7 +66,7 @@ extern "C" OrtStatusPtr OrtSessionOptionsAppendExecutionProvider_CoreML(OrtSessi
 
 using namespace std::string_literals;
 
-static const VSPlugin * myself = nullptr;
+#define PLUGIN_ID "io.github.amusementclub.vs_onnxruntime"
 static const OrtApi * ortapi = nullptr;
 static std::atomic<int64_t> logger_id = 0;
 
@@ -1419,10 +1419,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
     VSPlugin *plugin,
     const VSPLUGINAPI *vspapi
 ) {
-    myself = plugin;
-
     vspapi->configPlugin(
-        "io.github.amusementclub.vs_onnxruntime",
+        PLUGIN_ID,
         "ort",
         "ONNX Runtime ML Filter Runtime",
         VS_MAKE_VERSION(1, 0),
@@ -1460,7 +1458,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
         plugin
     );
 
-    auto getVersion = [](const VSMap *, VSMap * out, void *, VSCore *, const VSAPI *vsapi) {
+    auto getVersion = [](const VSMap *, VSMap * out, void *, VSCore * core, const VSAPI *vsapi) {
         vsapi->mapSetData(out, "version", VERSION, -1, dtUtf8, maReplace);
         vsapi->mapSetData(out, "onnxruntime_api_version_build", std::to_string(ORT_API_VERSION).c_str(), -1, dtUtf8, maReplace);
 
@@ -1477,7 +1475,10 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
         vsapi->mapSetData(out, "cuda_runtime_version", std::to_string(__CUDART_API_VERSION).c_str(), -1, dtUtf8, maReplace);
 #endif
         vsapi->mapSetData(out, "onnx_version", ONNX_NAMESPACE::LAST_RELEASE_VERSION, -1, dtUtf8, maReplace);
-        vsapi->mapSetData(out, "path", vsapi->getPluginPath(myself), -1, dtUtf8, maReplace);
+        auto plugin = vsapi->getPluginByID(PLUGIN_ID, core);
+        if (plugin) {
+            vsapi->mapSetData(out, "path", vsapi->getPluginPath(plugin), -1, dtUtf8, maReplace);
+        }
 
 #ifdef ENABLE_CUDA
         vsapi->mapSetData(out, "providers", "CUDA", -1, dtUtf8, maAppend);

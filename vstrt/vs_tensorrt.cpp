@@ -43,7 +43,11 @@ static std::wstring translateName(const char *name) {
 
 using namespace std::string_literals;
 
-static const VSPlugin * myself = nullptr;
+#if defined(TRT_MAJOR_RTX)
+#define PLUGIN_ID "io.github.amusementclub.vs_tensorrt_rtx"
+#else
+#define PLUGIN_ID "io.github.amusementclub.vs_tensorrt"
+#endif
 
 struct TicketSemaphore {
     std::atomic<intptr_t> ticket {};
@@ -624,15 +628,12 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
     VSPlugin *plugin,
     const VSPLUGINAPI *vspapi
 ) {
-    myself = plugin;
-
     vspapi->configPlugin(
+        PLUGIN_ID,
 #if defined(TRT_MAJOR_RTX)
-        "io.github.amusementclub.vs_tensorrt_rtx",
         "trt_rtx",
         "TensorRT-RTX ML Filter Runtime",
 #else
-        "io.github.amusementclub.vs_tensorrt",
         "trt",
         "TensorRT ML Filter Runtime",
 #endif
@@ -708,7 +709,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
         plugin
     );
 
-    auto getVersion = [](const VSMap *, VSMap * out, void *, VSCore *, const VSAPI *vsapi) {
+    auto getVersion = [](const VSMap *, VSMap * out, void *, VSCore * core, const VSAPI *vsapi) {
         vsapi->mapSetData(out, "version", VERSION, -1, dtUtf8, maReplace);
 
         vsapi->mapSetData(
@@ -741,7 +742,10 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
             -1, dtUtf8, maReplace
         );
 
-        vsapi->mapSetData(out, "path", vsapi->getPluginPath(myself), -1, dtUtf8, maReplace);
+        auto plugin = vsapi->getPluginByID(PLUGIN_ID, core);
+        if (plugin) {
+            vsapi->mapSetData(out, "path", vsapi->getPluginPath(plugin), -1, dtUtf8, maReplace);
+        }
     };
     vspapi->registerFunction("Version", "", "any", getVersion, nullptr, plugin);
 

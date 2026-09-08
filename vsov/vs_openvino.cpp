@@ -36,7 +36,7 @@
 
 using namespace std::string_literals;
 
-static const VSPlugin * myself = nullptr;
+#define PLUGIN_ID "io.github.amusementclub.vs_openvino"
 
 
 static std::array<int, 4> getShape(
@@ -752,10 +752,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
     VSPlugin *plugin,
     const VSPLUGINAPI *vspapi
 ) {
-    myself = plugin;
-
     vspapi->configPlugin(
-        "io.github.amusementclub.vs_openvino",
+        PLUGIN_ID,
         "ov",
         "OpenVINO ML Filter Runtime",
         VS_MAKE_VERSION(1, 0),
@@ -785,7 +783,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
         plugin
     );
 
-    auto getVersion = [](const VSMap *, VSMap * out, void *, VSCore *, const VSAPI *vsapi) {
+    auto getVersion = [](const VSMap *, VSMap * out, void *, VSCore * core, const VSAPI *vsapi) {
         vsapi->mapSetData(out, "version", VERSION, -1, dtUtf8, maReplace);
 
         std::ostringstream ostream;
@@ -803,7 +801,10 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
         vsapi->mapSetInt(out, "enable_visualization", 1, maReplace);
 #endif // ENABLE_VISUALIZATION
 
-        vsapi->mapSetData(out, "path", vsapi->getPluginPath(myself), -1, dtUtf8, maReplace);
+        auto plugin = vsapi->getPluginByID(PLUGIN_ID, core);
+        if (plugin) {
+            vsapi->mapSetData(out, "path", vsapi->getPluginPath(plugin), -1, dtUtf8, maReplace);
+        }
     };
     vspapi->registerFunction("Version", "", "any", getVersion, nullptr, plugin);
 

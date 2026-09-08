@@ -47,7 +47,7 @@ using namespace std::string_literals;
     }                                                                          \
 } while(0)
 
-static const VSPlugin * myself = nullptr;
+#define PLUGIN_ID "io.github.amusementclub.vs_migraphx"
 
 static inline const char * getErrorString(migraphx_status status) {
     switch (status) {
@@ -1000,10 +1000,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit(
     VSRegisterFunction registerFunc,
     VSPlugin *plugin
 ) noexcept {
-    myself = plugin;
-
     configFunc(
-        "io.github.amusementclub.vs_migraphx", "migx",
+        PLUGIN_ID, "migx",
         "MIGraphX ML Filter Runtime",
         VAPOURSYNTH_API_VERSION, 1, plugin
     );
@@ -1021,7 +1019,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit(
         plugin
     );
 
-    auto getVersion = [](const VSMap *, VSMap * out, void *, VSCore *, const VSAPI *vsapi) {
+    auto getVersion = [](const VSMap *, VSMap * out, void *, VSCore * core, const VSAPI *vsapi) {
         vsapi->propSetData(out, "version", VERSION, -1, paReplace);
 
 #ifndef NO_MIGX_VERSION
@@ -1045,7 +1043,10 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit(
 
         vsapi->propSetInt(out, "hip_runtime_version_build", HIP_VERSION, paReplace);
 
-        vsapi->propSetData(out, "path", vsapi->getPluginPath(myself), -1, paReplace);
+        auto plugin = vsapi->getPluginById(PLUGIN_ID, core);
+        if (plugin) {
+            vsapi->propSetData(out, "path", vsapi->getPluginPath(plugin), -1, paReplace);
+        }
     };
     registerFunc("Version", "", getVersion, nullptr, plugin);
 
