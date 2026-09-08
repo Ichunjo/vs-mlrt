@@ -4,7 +4,7 @@ The vs-onnxruntime plugin provides optimized CPU & CUDA runtime for some popular
 
 ## Usage
 
-Prototype: `core.ort.Model(clip[] clips, string network_path[, int[] overlap = None, int[] tilesize = None, string provider = "", int device_id = 0, int verbosity = 2, bint cudnn_benchmark = True, bint builtin = False, string builtindir="models", bint fp16 = False, bint path_is_serialization = False, bint use_cuda_graph = False])`
+Prototype: `core.ort.Model(clip[] clips, string network_path[, int[] overlap = None, int[] tilesize = None, string provider = "", int device_id = 0, int verbosity = 2, bint cudnn_benchmark = True, bint fp16 = False, bint path_is_serialization = False, bint use_cuda_graph = False])`
 
 Arguments:
 
@@ -25,8 +25,6 @@ Arguments:
   - 3: also info, `ORT_LOGGING_LEVEL_INFO`
   - 4: everything, `ORT_LOGGING_LEVEL_VERBOSE`
 - `bint cudnn_benchmark`: whether to let cuDNN use benchmarking to search for the best convolution kernel to use. Default True. It might incur some startup latency.
-- `bint builtin`: whether to load the model from the VS plugins directory, see also `builtindir`.
-- `string builtindir`: the model directory under VS plugins directory for builtin models, default "models".
 - `bint fp16`: whether to quantize model to fp16 for faster and memory efficient computation.
 - `bint path_is_serialization`: whether the `network_path` argument specifies an onnx serialization of type `bytes`.
 - `bint use_cuda_graph`: whether to use CUDA Graphs to improve performance and reduce CPU overhead in CUDA backend. Not all models are supported.

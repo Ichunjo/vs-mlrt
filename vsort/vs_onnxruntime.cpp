@@ -1070,15 +1070,6 @@ static void VS_CC vsOrtCreate(
         };
     } else {
         path = vsapi->mapGetData(in, "network_path", 0, nullptr);
-        bool builtin = !!vsapi->mapGetInt(in, "builtin", 0, &error);
-        if (builtin) {
-            const char *modeldir = vsapi->mapGetData(in, "builtindir", 0, &error);
-            if (!modeldir) modeldir = "models";
-            path = std::string(modeldir) + "/" + path;
-            std::string dir { vsapi->getPluginPath(myself) };
-            dir = dir.substr(0, dir.rfind('/') + 1);
-            path = dir + path;
-        }
         path_view = path;
     }
 
@@ -1451,8 +1442,6 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
         "num_streams:int:opt;"
         "verbosity:int:opt;"
         "cudnn_benchmark:int:opt;"
-        "builtin:int:opt;"
-        "builtindir:data:opt;"
         "fp16:int:opt;"
         "path_is_serialization:int:opt;"
         "use_cuda_graph:int:opt;"
