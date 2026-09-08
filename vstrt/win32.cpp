@@ -6,7 +6,11 @@
 #include <stdexcept>
 #include <filesystem>
 
-#define DLL_DIR L"vsmlrt-cuda"
+#if defined(TRT_MAJOR_RTX)
+#define DLL_DIR L"../../../tensorrt_rtx_libs"
+#else
+#define DLL_DIR L"../../../tensorrt_libs"
+#endif
 
 #include <iostream>
 
