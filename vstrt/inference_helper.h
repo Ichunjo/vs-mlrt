@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-#include <VSHelper.h>
+#include <VSHelper4.h>
 
 #include "cuda_helper.h"
 #include "trt_utils.h"
@@ -15,14 +15,14 @@
 struct InputInfo {
     int width;
     int height;
-    int pitch;
+    ptrdiff_t pitch;
     int bytes_per_sample;
     int tile_w;
     int tile_h;
 };
 
 struct OutputInfo {
-    int pitch;
+    ptrdiff_t pitch;
     int bytes_per_sample;
 };
 
@@ -78,7 +78,7 @@ std::optional<ErrorMessage> inference(
                         y * info.in.pitch + x * info.in.bytes_per_sample
                     };
 
-                    vs_bitblt(
+                    vsh::bitblt(
                         h_data, src_tile_w_bytes,
                         src_ptr, info.in.pitch,
                         static_cast<size_t>(src_tile_w_bytes),
@@ -110,7 +110,7 @@ std::optional<ErrorMessage> inference(
                         info.h_scale * y * info.out.pitch + info.w_scale * x * info.out.bytes_per_sample
                     };
 
-                    vs_bitblt(
+                    vsh::bitblt(
                         dst_ptr + (y_crop_start * info.out.pitch + x_crop_start * info.out.bytes_per_sample),
                         info.out.pitch,
                         h_data + (y_crop_start * dst_tile_w_bytes + x_crop_start * info.out.bytes_per_sample),

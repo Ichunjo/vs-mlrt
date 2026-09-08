@@ -11,8 +11,9 @@
 
 #include <NvInferRuntime.h>
 
-#include <VapourSynth.h>
-#include <VSHelper.h>
+#include <VapourSynth4.h>
+#include <VSHelper4.h>
+#include <VSConstants4.h>
 
 #ifdef __cpp_impl_reflection
 #include <meta>
@@ -49,16 +50,16 @@ void setDimensions(
     vi->width *= out_width / in_width;
 
     if (out_dims.d[1] == 1 || flexible_output) {
-        vi->format = vsapi->registerFormat(cmGray, sample_type, bits_per_sample, 0, 0, core);
+        vsapi->queryVideoFormat(&vi->format, cfGray, sample_type, bits_per_sample, 0, 0, core);
     } else if (out_dims.d[1] == 3) {
-        vi->format = vsapi->registerFormat(cmRGB, sample_type, bits_per_sample, 0, 0, core);
+        vsapi->queryVideoFormat(&vi->format, cfRGB, sample_type, bits_per_sample, 0, 0, core);
     }
 }
 
 static inline
 std::vector<const VSVideoInfo *> getVideoInfo(
     const VSAPI * vsapi,
-    const std::vector<VSNodeRef *> & nodes
+    const std::vector<VSNode *> & nodes
 ) noexcept {
 
     std::vector<const VSVideoInfo *> vis;
@@ -72,14 +73,14 @@ std::vector<const VSVideoInfo *> getVideoInfo(
 }
 
 static inline
-std::vector<const VSFrameRef *> getFrames(
+std::vector<const VSFrame *> getFrames(
     int n,
     const VSAPI * vsapi,
     VSFrameContext * frameCtx,
-    const std::vector<VSNodeRef *> & nodes
+    const std::vector<VSNode *> & nodes
 ) noexcept {
 
-    std::vector<const VSFrameRef *> frames;
+    std::vector<const VSFrame *> frames;
     frames.reserve(std::size(nodes));
 
     for (const auto & node : nodes) {
@@ -95,7 +96,7 @@ std::optional<std::string> checkNodes(
 ) noexcept {
 
     for (const auto & vi : vis) {
-        if (!isConstantFormat(vi)) {
+        if (!vsh::isConstantVideoFormat(vi)) {
             return "video format must be constant";
         }
 
@@ -107,7 +108,7 @@ std::optional<std::string> checkNodes(
             return "number of frames mismatch";
         }
 
-        if (vi->format->subSamplingH != 0 || vi->format->subSamplingW != 0) {
+        if (vi->format.subSamplingH != 0 || vi->format.subSamplingW != 0) {
             return "clip must not be sub-sampled";
         }
     }
@@ -123,11 +124,11 @@ std::optional<std::string> checkNodes(
 ) noexcept {
 
     for (const auto & vi : vis) {
-        if (vi->format->sampleType != sample_type) {
+        if (vi->format.sampleType != sample_type) {
             return "sample type mismatch";
         }
 
-        if (vi->format->bitsPerSample != bits_per_sample) {
+        if (vi->format.bitsPerSample != bits_per_sample) {
             return "bits per sample mismatch";
         }
     }
@@ -143,7 +144,7 @@ int numPlanes(
     int num_planes = 0;
 
     for (const auto & vi : vis) {
-        num_planes += vi->format->numPlanes;
+        num_planes += vi->format.numPlanes;
     }
 
     return num_planes;
@@ -186,29 +187,29 @@ static inline void VS_CC getDeviceProp(
 ) {
 
     int err;
-    int device_id = static_cast<int>(vsapi->propGetInt(in, "device_id", 0, &err));
+    int device_id = vsapi->mapGetIntSaturated(in, "device_id", 0, &err);
     if (err) {
         device_id = 0;
     }
 
     cudaDeviceProp prop;
     if (auto error = cudaGetDeviceProperties(&prop, device_id); error != cudaSuccess) {
-        vsapi->setError(out, cudaGetErrorString(error));
+        vsapi->mapSetError(out, cudaGetErrorString(error));
         return ;
     }
 
     auto setProp = [&](const char * name, const auto & value, int data_length = -1) {
         using T = std::decay_t<decltype(value)>;
         if constexpr (std::is_integral_v<T>) {
-            vsapi->propSetInt(out, name, static_cast<int64_t>(value), paReplace);
+            vsapi->mapSetInt(out, name, static_cast<int64_t>(value), maReplace);
         } else if constexpr (std::is_same_v<T, const char *>) {
-            vsapi->propSetData(out, name, value, data_length, paReplace);
+            vsapi->mapSetData(out, name, value, data_length, dtUtf8, maReplace);
         } else if constexpr (std::is_integral_v<std::remove_pointer_t<T>>) {
             std::array<int64_t, std::extent_v<std::remove_reference_t<decltype(value)>>> data;
             for (int i = 0; i < static_cast<int>(std::size(data)); i++) {
                 data[i] = value[i];
             }
-            vsapi->propSetIntArray(out, name, std::data(data), static_cast<int>(std::size(data)));
+            vsapi->mapSetIntArray(out, name, std::data(data), static_cast<int>(std::size(data)));
         }
     };
 
@@ -226,7 +227,7 @@ static inline void VS_CC getDeviceProp(
             for (int i = 0; i < 16; ++i) {
                 uuid[i] = prop.uuid.bytes[i];
             }
-            vsapi->propSetIntArray(out, "uuid", std::data(uuid), static_cast<int>(std::size(uuid)));
+            vsapi->mapSetIntArray(out, "uuid", std::data(uuid), static_cast<int>(std::size(uuid)));
         } else if constexpr (identifier_of(r) != "reserved") {
             setProp(std::string(identifier_of(r)).c_str(), prop.[:r:]);
         }
@@ -238,7 +239,7 @@ static inline void VS_CC getDeviceProp(
         for (int i = 0; i < 16; ++i) {
             uuid[i] = prop.uuid.bytes[i];
         }
-        vsapi->propSetIntArray(out, "uuid", std::data(uuid), static_cast<int>(std::size(uuid)));
+        vsapi->mapSetIntArray(out, "uuid", std::data(uuid), static_cast<int>(std::size(uuid)));
     }
     setProp("total_global_memory", prop.totalGlobalMem);
     setProp("shared_memory_per_block", prop.sharedMemPerBlock);

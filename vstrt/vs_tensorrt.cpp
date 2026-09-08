@@ -12,8 +12,9 @@
 #include <variant>
 #include <vector>
 
-#include <VapourSynth.h>
-#include <VSHelper.h>
+#include <VapourSynth4.h>
+#include <VSHelper4.h>
+#include <VSConstants4.h>
 
 #include <cuda_runtime.h>
 #include <NvInferRuntime.h>
@@ -72,7 +73,7 @@ struct TicketSemaphore {
 std::unique_ptr<Logger> logger;
 
 struct vsTrtData {
-    std::vector<VSNodeRef *> nodes;
+    std::vector<VSNode *> nodes;
     std::unique_ptr<VSVideoInfo> out_vi;
 
     int device_id;
@@ -111,30 +112,17 @@ struct vsTrtData {
     }
 };
 
-static void VS_CC vsTrtInit(
-    VSMap *in,
-    VSMap *out,
-    void **instanceData,
-    VSNode *node,
-    VSCore *core,
-    const VSAPI *vsapi
-) noexcept {
-
-    auto d = static_cast<vsTrtData *>(*instanceData);
-    vsapi->setVideoInfo(d->out_vi.get(), 1, node);
-}
-
-static const VSFrameRef *VS_CC vsTrtGetFrame(
+static const VSFrame *VS_CC vsTrtGetFrame(
     int n,
     int activationReason,
-    void **instanceData,
+    void *instanceData,
     void **frameData,
     VSFrameContext *frameCtx,
     VSCore *core,
     const VSAPI *vsapi
 ) noexcept {
 
-    auto d = static_cast<vsTrtData *>(*instanceData);
+    auto d = static_cast<vsTrtData *>(instanceData);
 
     if (activationReason == arInitial) {
         for (const auto & node : d->nodes) {
@@ -145,7 +133,7 @@ static const VSFrameRef *VS_CC vsTrtGetFrame(
             getVideoInfo(vsapi, d->nodes)
         };
 
-        const std::vector<const VSFrameRef *> src_frames {
+        const std::vector<const VSFrame *> src_frames {
             getFrames(n, vsapi, frameCtx, d->nodes)
         };
 
@@ -166,17 +154,17 @@ static const VSFrameRef *VS_CC vsTrtGetFrame(
         std::vector<const uint8_t *> src_ptrs;
         src_ptrs.reserve(src_planes);
         for (int i = 0; i < std::ssize(d->nodes); ++i) {
-            for (int j = 0; j < in_vis[i]->format->numPlanes; ++j) {
+            for (int j = 0; j < in_vis[i]->format.numPlanes; ++j) {
                 src_ptrs.emplace_back(vsapi->getReadPtr(src_frames[i], j));
             }
         }
 
-        VSFrameRef * const dst_frame { vsapi->newVideoFrame(
-            d->out_vi->format, d->out_vi->width, d->out_vi->height,
+        VSFrame * const dst_frame { vsapi->newVideoFrame(
+            &d->out_vi->format, d->out_vi->width, d->out_vi->height,
             src_frames[0], core
         )};
 
-        std::vector<VSFrameRef *> dst_frames;
+        std::vector<VSFrame *> dst_frames;
 
 #if NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
         auto output_name = d->engines[0]->getIOTensorName(1);
@@ -198,7 +186,7 @@ static const VSFrameRef *VS_CC vsTrtGetFrame(
         } else {
             for (int i = 0; i < dst_planes; ++i) {
                 auto frame { vsapi->newVideoFrame(
-                    d->out_vi->format, d->out_vi->width, d->out_vi->height,
+                    &d->out_vi->format, d->out_vi->width, d->out_vi->height,
                     src_frames[0], core
                 )};
                 dst_frames.emplace_back(frame);
@@ -214,13 +202,13 @@ static const VSFrameRef *VS_CC vsTrtGetFrame(
                 .width = vsapi->getFrameWidth(src_frames[0], 0),
                 .height = vsapi->getFrameHeight(src_frames[0], 0),
                 .pitch = vsapi->getStride(src_frames[0], 0),
-                .bytes_per_sample = vsapi->getFrameFormat(src_frames[0])->bytesPerSample,
+                .bytes_per_sample = vsapi->getVideoFrameFormat(src_frames[0])->bytesPerSample,
                 .tile_w = src_tile_w,
                 .tile_h = src_tile_h
             },
             .out = OutputInfo {
                 .pitch = vsapi->getStride(dst_frame, 0),
-                .bytes_per_sample = vsapi->getFrameFormat(dst_frame)->bytesPerSample
+                .bytes_per_sample = vsapi->getVideoFrameFormat(dst_frame)->bytesPerSample
             },
             .w_scale = w_scale,
             .h_scale = h_scale,
@@ -256,11 +244,11 @@ static const VSFrameRef *VS_CC vsTrtGetFrame(
         }
         
         if (!d->flexible_output_prop.empty()) {
-            auto prop = vsapi->getFramePropsRW(dst_frame);
+            auto prop = vsapi->getFramePropertiesRW(dst_frame);
 
             for (int i = 0; i < dst_planes; i++) {
                 auto key { d->flexible_output_prop + std::to_string(i) };
-                vsapi->propSetFrame(prop, key.c_str(), dst_frames[i], paReplace);
+                vsapi->mapSetFrame(prop, key.c_str(), dst_frames[i], maReplace);
                 vsapi->freeFrame(dst_frames[i]);
             }
         }
@@ -293,20 +281,20 @@ static void VS_CC vsTrtCreate(
 
     auto d { std::make_unique<vsTrtData>() };
 
-    int num_nodes = vsapi->propNumElements(in, "clips");
+    int num_nodes = vsapi->mapNumElements(in, "clips");
     d->nodes.reserve(num_nodes);
     for (int i = 0; i < num_nodes; ++i) {
-        d->nodes.emplace_back(vsapi->propGetNode(in, "clips", i, nullptr));
+        d->nodes.emplace_back(vsapi->mapGetNode(in, "clips", i, nullptr));
     }
 
     auto set_error = [&](const std::string & error_message) {
-        vsapi->setError(out, (__func__ + ": "s + error_message).c_str());
+        vsapi->mapSetError(out, (__func__ + ": "s + error_message).c_str());
         for (const auto & node : d->nodes) {
             vsapi->freeNode(node);
         }
     };
 
-    const char * engine_path = vsapi->propGetData(in, "engine_path", 0, nullptr);
+    const char * engine_path = vsapi->mapGetData(in, "engine_path", 0, nullptr);
 
     std::vector<const VSVideoInfo *> in_vis;
     in_vis.reserve(std::size(d->nodes));
@@ -318,8 +306,8 @@ static void VS_CC vsTrtCreate(
     }
 
     int error1, error2;
-    d->overlap_w = int64ToIntS(vsapi->propGetInt(in, "overlap", 0, &error1));
-    d->overlap_h = int64ToIntS(vsapi->propGetInt(in, "overlap", 1, &error2));
+    d->overlap_w = vsapi->mapGetIntSaturated(in, "overlap", 0, &error1);
+    d->overlap_h = vsapi->mapGetIntSaturated(in, "overlap", 1, &error2);
     if (!error1) {
         if (error2) {
             d->overlap_h = d->overlap_w;
@@ -333,8 +321,8 @@ static void VS_CC vsTrtCreate(
         d->overlap_h = 0;
     }
 
-    int tile_w = int64ToIntS(vsapi->propGetInt(in, "tilesize", 0, &error1));
-    int tile_h = int64ToIntS(vsapi->propGetInt(in, "tilesize", 1, &error2));
+    int tile_w = vsapi->mapGetIntSaturated(in, "tilesize", 0, &error1);
+    int tile_h = vsapi->mapGetIntSaturated(in, "tilesize", 1, &error2);
 
     TileSize tile_size;
     if (!error1) { // manual specification triggered
@@ -370,7 +358,7 @@ static void VS_CC vsTrtCreate(
 
     int error;
 
-    int device_id = int64ToIntS(vsapi->propGetInt(in, "device_id", 0, &error));
+    int device_id = vsapi->mapGetIntSaturated(in, "device_id", 0, &error);
     if (error) {
         device_id = 0;
     }
@@ -384,17 +372,17 @@ static void VS_CC vsTrtCreate(
     }
     d->device_id = device_id;
 
-    d->use_cuda_graph = !!vsapi->propGetInt(in, "use_cuda_graph", 0, &error);
+    d->use_cuda_graph = !!vsapi->mapGetInt(in, "use_cuda_graph", 0, &error);
     if (error) {
         d->use_cuda_graph = false;
     }
 
-    d->num_streams = int64ToIntS(vsapi->propGetInt(in, "num_streams", 0, &error));
+    d->num_streams = vsapi->mapGetIntSaturated(in, "num_streams", 0, &error);
     if (error) {
         d->num_streams = 1;
     }
 
-    int verbosity = int64ToIntS(vsapi->propGetInt(in, "verbosity", 0, &error));
+    int verbosity = vsapi->mapGetIntSaturated(in, "verbosity", 0, &error);
     if (error) {
         verbosity = int(nvinfer1::ILogger::Severity::kWARNING);
     }
@@ -403,7 +391,7 @@ static void VS_CC vsTrtCreate(
     }
     logger->set_verbosity(static_cast<nvinfer1::ILogger::Severity>(verbosity));
 
-    auto flexible_output_prop = vsapi->propGetData(in, "flexible_output_prop", 0, &error);
+    auto flexible_output_prop = vsapi->mapGetData(in, "flexible_output_prop", 0, &error);
     if (!error) {
         d->flexible_output_prop = flexible_output_prop;
     }
@@ -412,7 +400,7 @@ static void VS_CC vsTrtCreate(
     // related to https://github.com/AmusementClub/vs-mlrt/discussions/65, for unknown reason
 #if !(NV_TENSORRT_MAJOR == 9 && defined(_WIN32)) && !defined(TRT_MAJOR_RTX)
     if (!initLibNvInferPlugins(logger.get(), "")) {
-        vsapi->logMessage(mtWarning, "vstrt: Initialize TensorRT plugins failed");
+        vsapi->logMessage(mtWarning, "vstrt: Initialize TensorRT plugins failed", core);
     }
 #endif
 #endif
@@ -446,7 +434,7 @@ static void VS_CC vsTrtCreate(
         uint64_t diagnostics;
         auto engine_validity = d->runtime->getEngineValidity(engine_data.get(), static_cast<int64_t>(engine_nbytes), &diagnostics);
         if (engine_validity == nvinfer1::EngineValidity::kSUBOPTIMAL) {
-            vsapi->logMessage(mtWarning, "suboptimal engine");
+            vsapi->logMessage(mtWarning, "suboptimal engine", core);
         } else if (engine_validity == nvinfer1::EngineValidity::kINVALID) {
             std::ostringstream diagnostics_message;
             diagnostics_message << "invalid engine: ";
@@ -606,31 +594,52 @@ static void VS_CC vsTrtCreate(
         #else // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
             const nvinfer1::Dims & out_dims = exec_context->getBindingDimensions(1);
         #endif // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
-        vsapi->propSetInt(out, "num_planes", out_dims.d[1], paReplace);
+        vsapi->mapSetInt(out, "num_planes", out_dims.d[1], maReplace);
     }
 
-    vsapi->createFilter(
-        in, out, "Model",
-        vsTrtInit, vsTrtGetFrame, vsTrtFree,
-        fmParallel, 0, d.release(), core
+    std::vector<VSFilterDependency> deps;
+    deps.reserve(d->nodes.size());
+    for (auto *node : d->nodes) {
+        deps.push_back({node, rpGeneral});
+    }
+
+    auto *out_vi = d->out_vi.get();
+    auto *instance_data = d.release();
+
+    vsapi->createVideoFilter(
+        out,
+        "Model",
+        out_vi,
+        vsTrtGetFrame,
+        vsTrtFree,
+        fmParallel,
+        deps.data(),
+        static_cast<int>(deps.size()),
+        instance_data,
+        core
     );
 }
 
-VS_EXTERNAL_API(void) VapourSynthPluginInit(
-    VSConfigPlugin configFunc,
-    VSRegisterFunction registerFunc,
-    VSPlugin *plugin
-) noexcept {
+VS_EXTERNAL_API(void) VapourSynthPluginInit2(
+    VSPlugin *plugin,
+    const VSPLUGINAPI *vspapi
+) {
+    myself = plugin;
 
-    configFunc(
+    vspapi->configPlugin(
 #if defined(TRT_MAJOR_RTX)
         "io.github.amusementclub.vs_tensorrt_rtx",
-        "trt_rtx", "TensorRT-RTX ML Filter Runtime",
+        "trt_rtx",
+        "TensorRT-RTX ML Filter Runtime",
 #else
         "io.github.amusementclub.vs_tensorrt",
-        "trt", "TensorRT ML Filter Runtime",
+        "trt",
+        "TensorRT ML Filter Runtime",
 #endif
-        VAPOURSYNTH_API_VERSION, 1, plugin
+        VS_MAKE_VERSION(1, 0),
+        VAPOURSYNTH_API_VERSION,
+        0,
+        plugin
     );
 
     // TRT 9 for windows does not export getInferLibVersion()
@@ -682,10 +691,9 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit(
     }
 #endif // NV_TENSORRT_MAJOR == 9 && defined(_WIN32) && !defined(TRT_MAJOR_RTX)
 
-    myself = plugin;
-
-    registerFunc("Model",
-        "clips:clip[];"
+    vspapi->registerFunction(
+        "Model",
+        "clips:vnode[];"
         "engine_path:data;"
         "overlap:int[]:opt;"
         "tilesize:int[]:opt;"
@@ -694,44 +702,48 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit(
         "num_streams:int:opt;"
         "verbosity:int:opt;"
         "flexible_output_prop:data:opt;",
+        "clip:vnode;",
         vsTrtCreate,
         nullptr,
         plugin
     );
 
     auto getVersion = [](const VSMap *, VSMap * out, void *, VSCore *, const VSAPI *vsapi) {
-        vsapi->propSetData(out, "version", VERSION, -1, paReplace);
+        vsapi->mapSetData(out, "version", VERSION, -1, dtUtf8, maReplace);
 
-        vsapi->propSetData(
+        vsapi->mapSetData(
             out, "tensorrt_version",
 #if NV_TENSORRT_MAJOR == 9 && defined(_WIN32) && !defined(TRT_MAJOR_RTX)
             std::to_string(NV_TENSORRT_VERSION).c_str(), 
 #else
             std::to_string(getInferLibVersion()).c_str(), 
 #endif
-            -1, paReplace
+            -1, dtUtf8, maReplace
         );
 
-        vsapi->propSetData(
+        vsapi->mapSetData(
             out, "tensorrt_version_build",
-            std::to_string(NV_TENSORRT_VERSION).c_str(), -1, paReplace
+            std::to_string(NV_TENSORRT_VERSION).c_str(),
+            -1, dtUtf8, maReplace
         );
 
         int runtime_version;
         cudaRuntimeGetVersion(&runtime_version);
-        vsapi->propSetData(
+        vsapi->mapSetData(
             out, "cuda_runtime_version",
-            std::to_string(runtime_version).c_str(), -1, paReplace
+            std::to_string(runtime_version).c_str(),
+            -1, dtUtf8, maReplace
         );
 
-        vsapi->propSetData(
+        vsapi->mapSetData(
             out, "cuda_runtime_version_build",
-            std::to_string(__CUDART_API_VERSION).c_str(), -1, paReplace
+            std::to_string(__CUDART_API_VERSION).c_str(),
+            -1, dtUtf8, maReplace
         );
 
-        vsapi->propSetData(out, "path", vsapi->getPluginPath(myself), -1, paReplace);
+        vsapi->mapSetData(out, "path", vsapi->getPluginPath(myself), -1, dtUtf8, maReplace);
     };
-    registerFunc("Version", "", getVersion, nullptr, plugin);
+    vspapi->registerFunction("Version", "", "any", getVersion, nullptr, plugin);
 
-    registerFunc("DeviceProperties", "device_id:int:opt;", getDeviceProp, nullptr, plugin);
+    vspapi->registerFunction("DeviceProperties", "device_id:int:opt;", "any", getDeviceProp, nullptr, plugin);
 }
