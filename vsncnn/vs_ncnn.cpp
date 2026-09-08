@@ -670,16 +670,19 @@ static void VS_CC vsNcnnCreate(
         deps.push_back({node, rpGeneral});
     }
 
+    auto *out_vi = d->out_vi.get();
+    auto *instance_data = d.release();
+
     vsapi->createVideoFilter(
         out,
         "Model",
-        d->out_vi.get(),
+        out_vi,
         vsNcnnGetFrame,
         vsNcnnFree,
         fmParallel,
         deps.data(),
         static_cast<int>(deps.size()),
-        d.release(),
+        instance_data,
         core
     );
 }
