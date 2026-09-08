@@ -15,7 +15,7 @@
 #include <tuple>
 #include <vector>
 
-#include <VSHelper.h> // for vs_aligned_malloc
+#include <VSHelper4.h>
 
 static std::vector<int> get_node_attr_ai(const onnx::NodeProto& node, const char* key) {
     std::vector<int> v;
@@ -5163,10 +5163,10 @@ std::optional<std::tuple<char*, unsigned char*>> onnx2ncnn(onnx::ModelProto& mod
     auto param_size = static_cast<size_t>(std::ftell(pp));
     // ncnn requires only 32-bit alignment,
     // while posix_memalign() requires a multiple of sizeof(void *)
-    auto param = vs_aligned_malloc<char>(param_size, sizeof(void *));
+    auto param = vsh::vsh_aligned_malloc<char>(param_size, sizeof(void *));
     std::rewind(pp);
     if (std::fread(param, 1, param_size, pp) != param_size) {
-        std::free(param);
+        vsh::vsh_aligned_free(param);
         std::fclose(pp);
         std::fclose(bp);
         return {};
@@ -5174,11 +5174,11 @@ std::optional<std::tuple<char*, unsigned char*>> onnx2ncnn(onnx::ModelProto& mod
     std::fclose(pp);
 
     auto model_size = static_cast<size_t>(std::ftell(bp));
-    auto model_bin = vs_aligned_malloc<unsigned char>(model_size, sizeof(void *));
+    auto model_bin = vsh::vsh_aligned_malloc<unsigned char>(model_size, sizeof(void *));
     std::rewind(bp);
     if (std::fread(model_bin, 1, model_size, bp) != model_size) {
-        std::free(model_bin);
-        std::free(param);
+        vsh::vsh_aligned_free(model_bin);
+        vsh::vsh_aligned_free(param);
         std::fclose(bp);
     }
     std::fclose(bp);

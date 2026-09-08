@@ -16,8 +16,9 @@
 #include <thread>
 #endif
 
-#include <VapourSynth.h>
-#include <VSHelper.h>
+#include <VapourSynth4.h>
+#include <VSHelper4.h>
+#include <VSConstants4.h>
 
 // ncnn
 #include <net.h>
@@ -40,11 +41,11 @@ static std::optional<std::string> checkNodes(
 ) noexcept {
 
     for (const auto & vi : vis) {
-        if (vi->format->sampleType != stFloat) {
+        if (vi->format.sampleType != stFloat) {
             return "expects clip with floating-point type";
         }
         
-        if (vi->format->bitsPerSample != 32 && vi->format->bitsPerSample != 16) {
+        if (vi->format.bitsPerSample != 32 && vi->format.bitsPerSample != 16) {
             return "expects clip with type fp32 or fp16";
         }
 
@@ -56,7 +57,7 @@ static std::optional<std::string> checkNodes(
             return "number of frames mismatch";
         }
 
-        if (vi->format->subSamplingH != 0 || vi->format->subSamplingW != 0) {
+        if (vi->format.subSamplingH != 0 || vi->format.subSamplingW != 0) {
             return "clip must not be sub-sampled";
         }
     }
@@ -108,7 +109,7 @@ struct Resource {
 static std::atomic<int> num_plugin_instances {};
 
 struct vsNcnnData {
-    std::vector<VSNodeRef *> nodes;
+    std::vector<VSNode *> nodes;
     std::unique_ptr<VSVideoInfo> out_vi;
 
     int overlap_w, overlap_h;
@@ -151,65 +152,51 @@ struct vsNcnnData {
 };
 
 
-static void VS_CC vsNcnnInit(
-    VSMap *in,
-    VSMap *out,
-    void **instanceData,
-    VSNode *node,
-    VSCore *core,
-    const VSAPI *vsapi
-) noexcept {
-
-    auto d = static_cast<vsNcnnData *>(*instanceData);
-    vsapi->setVideoInfo(d->out_vi.get(), 1, node);
-}
-
-
-static const VSFrameRef *VS_CC vsNcnnGetFrame(
+static const VSFrame *VS_CC vsNcnnGetFrame(
     int n,
     int activationReason,
-    void **instanceData,
+    void *instanceData,
     void **frameData,
     VSFrameContext *frameCtx,
     VSCore *core,
     const VSAPI *vsapi
 ) noexcept {
 
-    auto d = static_cast<vsNcnnData *>(*instanceData);
+    auto *d = static_cast<vsNcnnData *>(instanceData);
 
     if (activationReason == arInitial) {
-        for (const auto & node : d->nodes) {
+        for (auto *node : d->nodes) {
             vsapi->requestFrameFilter(n, node, frameCtx);
         }
     } else if (activationReason == arAllFramesReady) {
         std::vector<const VSVideoInfo *> in_vis;
-        in_vis.reserve(std::size(d->nodes));
-        for (const auto & node : d->nodes) {
+        in_vis.reserve(d->nodes.size());
+        for (auto *node : d->nodes) {
             in_vis.emplace_back(vsapi->getVideoInfo(node));
         }
 
-        const auto fp16_input = in_vis[0]->format->bitsPerSample == 16;
+        const auto fp16_input = in_vis[0]->format.bitsPerSample == 16;
 
-        std::vector<const VSFrameRef *> src_frames;
-        src_frames.reserve(std::size(d->nodes));
-        for (const auto & node : d->nodes) {
+        std::vector<const VSFrame *> src_frames;
+        src_frames.reserve(d->nodes.size());
+        for (auto *node : d->nodes) {
             src_frames.emplace_back(vsapi->getFrameFilter(n, node, frameCtx));
         }
 
         auto src_stride = vsapi->getStride(src_frames.front(), 0);
         auto src_width = vsapi->getFrameWidth(src_frames.front(), 0);
         auto src_height = vsapi->getFrameHeight(src_frames.front(), 0);
-        auto src_bytes = vsapi->getFrameFormat(src_frames.front())->bytesPerSample;
+        auto src_bytes = vsapi->getVideoFrameFormat(src_frames.front())->bytesPerSample;
 
-        VSFrameRef * const dst_frame = vsapi->newVideoFrame(
-            d->out_vi->format, d->out_vi->width, d->out_vi->height,
+        VSFrame * const dst_frame = vsapi->newVideoFrame(
+            &d->out_vi->format, d->out_vi->width, d->out_vi->height,
             src_frames.front(), core
         );
 
-        std::vector<VSFrameRef *> dst_frames;
+        std::vector<VSFrame *> dst_frames;
 
         auto dst_stride = vsapi->getStride(dst_frame, 0);
-        auto dst_bytes = vsapi->getFrameFormat(dst_frame)->bytesPerSample;
+        auto dst_bytes = vsapi->getVideoFrameFormat(dst_frame)->bytesPerSample;
 
         auto ticket = d->acquire();
         Resource & resource = d->resources[ticket];
@@ -221,8 +208,8 @@ static const VSFrameRef *VS_CC vsNcnnGetFrame(
 
         std::vector<const uint8_t *> src_ptrs;
         src_ptrs.reserve(src_tile_shape[1]);
-        for (unsigned i = 0; i < std::size(d->nodes); ++i) {
-            for (int j = 0; j < in_vis[i]->format->numPlanes; ++j) {
+        for (unsigned i = 0; i < d->nodes.size(); ++i) {
+            for (int j = 0; j < in_vis[i]->format.numPlanes; ++j) {
                 src_ptrs.emplace_back(vsapi->getReadPtr(src_frames[i], j));
             }
         }
@@ -243,10 +230,10 @@ static const VSFrameRef *VS_CC vsNcnnGetFrame(
             }
         } else {
             for (int i = 0; i < dst_planes; ++i) {
-                auto frame { vsapi->newVideoFrame(
-                    d->out_vi->format, d->out_vi->width, d->out_vi->height,
+                auto *frame = vsapi->newVideoFrame(
+                    &d->out_vi->format, d->out_vi->width, d->out_vi->height,
                     src_frames[0], core
-                )};
+                );
                 dst_frames.emplace_back(frame);
                 dst_ptrs.emplace_back(vsapi->getWritePtr(frame, 0));
             }
@@ -265,13 +252,13 @@ static const VSFrameRef *VS_CC vsNcnnGetFrame(
 
             d->release(ticket);
 
-            for (const auto & frame : dst_frames) {
+            for (const auto *frame : dst_frames) {
                 vsapi->freeFrame(frame);
             }
 
             vsapi->freeFrame(dst_frame);
 
-            for (const auto & frame : src_frames) {
+            for (const auto *frame : src_frames) {
                 vsapi->freeFrame(frame);
             }
 
@@ -305,7 +292,7 @@ static const VSFrameRef *VS_CC vsNcnnGetFrame(
                         };
 
                         {
-                            vs_bitblt(
+                            vsh::bitblt(
                                 input_buffer, src_tile_w_bytes,
                                 src_ptr, src_stride,
                                 src_tile_w_bytes, src_tile_h
@@ -353,7 +340,7 @@ static const VSFrameRef *VS_CC vsNcnnGetFrame(
                         );
 
                         {
-                            vs_bitblt(
+                            vsh::bitblt(
                                 dst_ptr + (y_crop_start * dst_stride + x_crop_start * dst_bytes),
                                 dst_stride,
                                 output_buffer + (y_crop_start * dst_tile_w_bytes + x_crop_start * dst_bytes),
@@ -383,16 +370,16 @@ static const VSFrameRef *VS_CC vsNcnnGetFrame(
 
         d->release(ticket);
 
-        for (const auto & frame : src_frames) {
+        for (const auto *frame : src_frames) {
             vsapi->freeFrame(frame);
         }
 
         if (!d->flexible_output_prop.empty()) {
-            auto prop = vsapi->getFramePropsRW(dst_frame);
+            auto *prop = vsapi->getFramePropertiesRW(dst_frame);
 
             for (int i = 0; i < dst_planes; i++) {
                 auto key { d->flexible_output_prop + std::to_string(i) };
-                vsapi->propSetFrame(prop, key.c_str(), dst_frames[i], paReplace);
+                vsapi->mapSetFrame(prop, key.c_str(), dst_frames[i], maReplace);
                 vsapi->freeFrame(dst_frames[i]);
             }
         }
@@ -410,9 +397,9 @@ static void VS_CC vsNcnnFree(
     const VSAPI *vsapi
 ) noexcept {
 
-    auto d = static_cast<vsNcnnData *>(instanceData);
+    auto *d = static_cast<vsNcnnData *>(instanceData);
 
-    for (const auto & node : d->nodes) {
+    for (auto *node : d->nodes) {
         vsapi->freeNode(node);
     }
 
@@ -448,16 +435,16 @@ static void VS_CC vsNcnnCreate(
     auto d { std::make_unique<vsNcnnData>() };
     num_plugin_instances++;
 
-    int num_nodes = vsapi->propNumElements(in, "clips");
+    int num_nodes = vsapi->mapNumElements(in, "clips");
     d->nodes.reserve(num_nodes);
     for (int i = 0; i < num_nodes; ++i) {
-        d->nodes.emplace_back(vsapi->propGetNode(in, "clips", i, nullptr));
+        d->nodes.emplace_back(vsapi->mapGetNode(in, "clips", i, nullptr));
     }
 
     auto set_error = [&](const std::string & error_message) {
         using namespace std::string_literals;
-        vsapi->setError(out, (__func__ + ": "s + error_message).c_str());
-        for (const auto & node : d->nodes) {
+        vsapi->mapSetError(out, (__func__ + ": "s + error_message).c_str());
+        for (auto *node : d->nodes) {
             vsapi->freeNode(node);
         }
         if (--num_plugin_instances == 0) {
@@ -466,8 +453,8 @@ static void VS_CC vsNcnnCreate(
     };
 
     std::vector<const VSVideoInfo *> in_vis;
-    in_vis.reserve(std::size(d->nodes));
-    for (const auto & node : d->nodes) {
+    in_vis.reserve(d->nodes.size());
+    for (auto *node : d->nodes) {
         in_vis.emplace_back(vsapi->getVideoInfo(node));
     }
 
@@ -477,14 +464,14 @@ static void VS_CC vsNcnnCreate(
 
     int error;
 
-    int device_id = int64ToIntS(vsapi->propGetInt(in, "device_id", 0, &error));
+    int device_id = vsapi->mapGetIntSaturated(in, "device_id", 0, &error);
     if (error) {
         device_id = 0;
     }
 
     int error1, error2;
-    d->overlap_w = int64ToIntS(vsapi->propGetInt(in, "overlap", 0, &error1));
-    d->overlap_h = int64ToIntS(vsapi->propGetInt(in, "overlap", 1, &error2));
+    d->overlap_w = vsapi->mapGetIntSaturated(in, "overlap", 0, &error1);
+    d->overlap_h = vsapi->mapGetIntSaturated(in, "overlap", 1, &error2);
     if (!error1) {
         if (error2) {
             d->overlap_h = d->overlap_w;
@@ -498,8 +485,8 @@ static void VS_CC vsNcnnCreate(
         d->overlap_h = 0;
     }
 
-    int64_t tile_w = vsapi->propGetInt(in, "tilesize", 0, &error1);
-    int64_t tile_h = vsapi->propGetInt(in, "tilesize", 1, &error2);
+    int64_t tile_w = vsapi->mapGetInt(in, "tilesize", 0, &error1);
+    int64_t tile_h = vsapi->mapGetInt(in, "tilesize", 1, &error2);
     if (!error1) { // manual specification triggered
         if (error2) {
             tile_h = tile_w;
@@ -517,7 +504,7 @@ static void VS_CC vsNcnnCreate(
         return set_error("\"overlap\" too large");
     }
 
-    int num_streams = int64ToIntS(vsapi->propGetInt(in, "num_streams", 0, &error));
+    int num_streams = vsapi->mapGetIntSaturated(in, "num_streams", 0, &error);
     if (error) {
         num_streams = 1;
     }
@@ -531,25 +518,25 @@ static void VS_CC vsNcnnCreate(
         d->tickets.push_back(i);
     }
 
-    d->fp16 = !!vsapi->propGetInt(in, "fp16", 0, &error);
+    d->fp16 = !!vsapi->mapGetInt(in, "fp16", 0, &error);
     if (error) {
         d->fp16 = false;
     }
-    if (!d->fp16 && in_vis[0]->format->bitsPerSample != 32) {
+    if (!d->fp16 && in_vis[0]->format.bitsPerSample != 32) {
         return set_error("expects clip with type fp32");
     }
 
-    auto flexible_output_prop = vsapi->propGetData(in, "flexible_output_prop", 0, &error);
+    auto flexible_output_prop = vsapi->mapGetData(in, "flexible_output_prop", 0, &error);
     if (!error) {
         d->flexible_output_prop = flexible_output_prop;
     }
 
-    bool path_is_serialization = !!vsapi->propGetInt(in, "path_is_serialization", 0, &error);
+    bool path_is_serialization = !!vsapi->mapGetInt(in, "path_is_serialization", 0, &error);
     if (error) {
         path_is_serialization = false;
     }
 
-    int output_format = int64ToIntS(vsapi->propGetInt(in, "output_format", 0, &error));
+    int output_format = vsapi->mapGetIntSaturated(in, "output_format", 0, &error);
     if (error) {
         output_format = 0;
     }
@@ -564,14 +551,14 @@ static void VS_CC vsNcnnCreate(
     std::string path;
     if (path_is_serialization) {
         path_view = {
-            vsapi->propGetData(in, "network_path", 0, nullptr),
-            static_cast<size_t>(vsapi->propGetDataSize(in, "network_path", 0, nullptr))
+            vsapi->mapGetData(in, "network_path", 0, nullptr),
+            static_cast<size_t>(vsapi->mapGetDataSize(in, "network_path", 0, nullptr))
         };
     } else {
-        path = vsapi->propGetData(in, "network_path", 0, nullptr);
-        bool builtin = !!vsapi->propGetInt(in, "builtin", 0, &error);
+        path = vsapi->mapGetData(in, "network_path", 0, nullptr);
+        bool builtin = !!vsapi->mapGetInt(in, "builtin", 0, &error);
         if (builtin) {
-            const char *modeldir = vsapi->propGetData(in, "builtindir", 0, &error);
+            const char *modeldir = vsapi->mapGetData(in, "builtindir", 0, &error);
             if (!modeldir) modeldir = "models";
             path = std::string(modeldir) + "/" + path;
             std::string dir { vsapi->getPluginPath(myself) };
@@ -589,23 +576,27 @@ static void VS_CC vsNcnnCreate(
     auto onnx_model = std::move(std::get<ONNX_NAMESPACE::ModelProto>(result));
     {
         const auto & input_shape = onnx_model.graph().input(0).type().tensor_type().shape();
-        d->in_tile_c = int64ToIntS(input_shape.dim(1).dim_value());
-        d->in_tile_h = int64ToIntS(input_shape.dim(2).dim_value());
-        d->in_tile_w = int64ToIntS(input_shape.dim(3).dim_value());
+        d->in_tile_c = vsh::int64ToIntS(input_shape.dim(1).dim_value());
+        d->in_tile_h = vsh::int64ToIntS(input_shape.dim(2).dim_value());
+        d->in_tile_w = vsh::int64ToIntS(input_shape.dim(3).dim_value());
 
         const auto & output_shape = onnx_model.graph().output(0).type().tensor_type().shape();
-        d->out_tile_c = int64ToIntS(output_shape.dim(1).dim_value());
-        d->out_tile_h = int64ToIntS(output_shape.dim(2).dim_value());
-        d->out_tile_w = int64ToIntS(output_shape.dim(3).dim_value());
+        d->out_tile_c = vsh::int64ToIntS(output_shape.dim(1).dim_value());
+        d->out_tile_h = vsh::int64ToIntS(output_shape.dim(2).dim_value());
+        d->out_tile_w = vsh::int64ToIntS(output_shape.dim(3).dim_value());
     }
 
     d->out_vi = std::make_unique<VSVideoInfo>(*in_vis.front()); // mutable
     d->out_vi->width *= d->out_tile_w / d->in_tile_w;
     d->out_vi->height *= d->out_tile_h / d->in_tile_h;
     if (d->out_tile_c == 1 || !d->flexible_output_prop.empty()) {
-        d->out_vi->format = vsapi->registerFormat(cmGray, stFloat, output_format == 0 ? 32 : 16, 0, 0, core);
+        if (!vsapi->queryVideoFormat(&d->out_vi->format, cfGray, stFloat, output_format == 0 ? 32 : 16, 0, 0, core)) {
+            return set_error("failed to query video format for Gray");
+        }
     } else if (d->out_tile_c == 3) {
-        d->out_vi->format = vsapi->registerFormat(cmRGB, stFloat, output_format == 0 ? 32 : 16, 0, 0, core);
+        if (!vsapi->queryVideoFormat(&d->out_vi->format, cfRGB, stFloat, output_format == 0 ? 32 : 16, 0, 0, core)) {
+            return set_error("failed to query video format for RGB");
+        }
     } else {
         return set_error("output dimensions must be 1 or 3, or enable \"flexible_output\"");
     }
@@ -621,8 +612,8 @@ static void VS_CC vsNcnnCreate(
     if (auto device = ncnn::get_gpu_device(device_id); device != nullptr) {
         d->device = device;
     } else {
-        vs_aligned_free(ncnn_param);
-        vs_aligned_free(ncnn_model_bin);
+        vsh::vsh_aligned_free(ncnn_param);
+        vsh::vsh_aligned_free(ncnn_model_bin);
         return set_error("get_gpu_device failed");
     }
 
@@ -633,14 +624,14 @@ static void VS_CC vsNcnnCreate(
     d->net.opt.use_int8_storage = false;
     d->net.set_vulkan_device(d->device);
     if (d->net.load_param_mem(ncnn_param) != 0) {
-        vs_aligned_free(ncnn_param);
-        vs_aligned_free(ncnn_model_bin);
+        vsh::vsh_aligned_free(ncnn_param);
+        vsh::vsh_aligned_free(ncnn_model_bin);
         return set_error("load param failed");
     }
-    vs_aligned_free(ncnn_param);
+    vsh::vsh_aligned_free(ncnn_param);
     // TODO: here returns the number of bytes read successfully
     d->net.load_model(ncnn_model_bin);
-    vs_aligned_free(ncnn_model_bin);
+    vsh::vsh_aligned_free(ncnn_model_bin);
 
     d->input_index = d->net.input_indexes().front();
     d->output_index = d->net.output_indexes().front();
@@ -660,23 +651,36 @@ static void VS_CC vsNcnnCreate(
         resource.d_dst.create(d->out_tile_w, d->out_tile_h, d->out_tile_c, bps, resource.blob_vkallocator);
         resource.h_dst.create(d->out_tile_w, d->out_tile_h, d->out_tile_c, bps);
         if (d->fp16) {
-            if (in_vis[0]->format->bitsPerSample == 32) {
+            if (in_vis[0]->format.bitsPerSample == 32) {
                 resource.h_src_fp32.create(d->in_tile_w, d->in_tile_h, d->in_tile_c, sizeof(float));
             }
-            if (d->out_vi->format->bitsPerSample == 32) {
+            if (d->out_vi->format.bitsPerSample == 32) {
                 resource.h_dst_fp32.create(d->out_tile_w, d->out_tile_h, d->out_tile_c, sizeof(float));
             }
         }
     }
 
     if (!d->flexible_output_prop.empty()) {
-        vsapi->propSetInt(out, "num_planes", d->out_tile_c, paReplace);
+        vsapi->mapSetInt(out, "num_planes", d->out_tile_c, maReplace);
     }
 
-    vsapi->createFilter(
-        in, out, "Model",
-        vsNcnnInit, vsNcnnGetFrame, vsNcnnFree,
-        fmParallel, 0, d.release(), core
+    std::vector<VSFilterDependency> deps;
+    deps.reserve(d->nodes.size());
+    for (auto *node : d->nodes) {
+        deps.push_back({node, rpGeneral});
+    }
+
+    vsapi->createVideoFilter(
+        out,
+        "Model",
+        d->out_vi.get(),
+        vsNcnnGetFrame,
+        vsNcnnFree,
+        fmParallel,
+        deps.data(),
+        static_cast<int>(deps.size()),
+        d.release(),
+        core
     );
 }
 
@@ -687,14 +691,14 @@ static inline void VS_CC getDeviceProp(
 ) {
 
     int err;
-    int device_id = int64ToIntS(vsapi->propGetInt(in, "device_id", 0, &err));
+    int device_id = vsapi->mapGetIntSaturated(in, "device_id", 0, &err);
     if (err) {
         device_id = 0;
     }
 
     ncnn::VulkanDevice * device = ncnn::get_gpu_device(device_id);
     if (device == nullptr) {
-        vsapi->setError(out, "get_gpu_device failed");
+        vsapi->mapSetError(out, "get_gpu_device failed");
         return ;
     }
     const auto & info = device->info;
@@ -702,11 +706,11 @@ static inline void VS_CC getDeviceProp(
     auto setProp = [&](const char * name, auto value, int data_length = -1) {
         using T = std::decay_t<decltype(value)>;
         if constexpr (std::is_integral_v<T>) {
-            vsapi->propSetInt(out, name, static_cast<int64_t>(value), paReplace);
+            vsapi->mapSetInt(out, name, static_cast<int64_t>(value), maReplace);
         } else if constexpr (std::is_floating_point_v<T>) {
-            vsapi->propSetFloat(out, name, value, paReplace);
+            vsapi->mapSetFloat(out, name, value, maReplace);
         } else if constexpr (std::is_same_v<T, const char *>) {
-            vsapi->propSetData(out, name, value, data_length, paReplace);
+            vsapi->mapSetData(out, name, value, data_length, dtUtf8, maReplace);
         }
     };
 
@@ -779,22 +783,25 @@ static inline void VS_CC getDeviceProp(
 };
 
 
-VS_EXTERNAL_API(void) VapourSynthPluginInit(
-    VSConfigPlugin configFunc,
-    VSRegisterFunction registerFunc,
-    VSPlugin *plugin
-) noexcept {
-
+VS_EXTERNAL_API(void) VapourSynthPluginInit2(
+    VSPlugin *plugin,
+    const VSPLUGINAPI *vspapi
+) {
     myself = plugin;
 
-    configFunc(
-        "io.github.amusementclub.vs_ncnn", "ncnn",
+    vspapi->configPlugin(
+        "io.github.amusementclub.vs_ncnn",
+        "ncnn",
         "NCNN ML Filter Runtime",
-        VAPOURSYNTH_API_VERSION, 1, plugin
+        VS_MAKE_VERSION(1, 0),
+        VAPOURSYNTH_API_VERSION,
+        0,
+        plugin
     );
 
-    registerFunc("Model",
-        "clips:clip[];"
+    vspapi->registerFunction(
+        "Model",
+        "clips:vnode[];"
         "network_path:data;"
         "overlap:int[]:opt;"
         "tilesize:int[]:opt;"
@@ -805,28 +812,20 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit(
         "fp16:int:opt;"
         "path_is_serialization:int:opt;"
         "flexible_output_prop:data:opt;"
-        "output_format:int:opt;"
-        , vsNcnnCreate,
+        "output_format:int:opt;",
+        "clip:vnode;",
+        vsNcnnCreate,
         nullptr,
         plugin
     );
 
     auto getVersion = [](const VSMap *, VSMap * out, void *, VSCore *, const VSAPI *vsapi) {
-        vsapi->propSetData(out, "version", VERSION, -1, paReplace);
-
-        vsapi->propSetData(
-            out, "onnx_version",
-            ONNX_NAMESPACE::LAST_RELEASE_VERSION, -1, paReplace
-        );
-
-        vsapi->propSetData(
-            out, "ncnn_version",
-            NCNN_VERSION_STRING, -1, paReplace
-        );
-
-        vsapi->propSetData(out, "path", vsapi->getPluginPath(myself), -1, paReplace);
+        vsapi->mapSetData(out, "version", VERSION, -1, dtUtf8, maReplace);
+        vsapi->mapSetData(out, "onnx_version", ONNX_NAMESPACE::LAST_RELEASE_VERSION, -1, dtUtf8, maReplace);
+        vsapi->mapSetData(out, "ncnn_version", NCNN_VERSION_STRING, -1, dtUtf8, maReplace);
+        vsapi->mapSetData(out, "path", vsapi->getPluginPath(myself), -1, dtUtf8, maReplace);
     };
-    registerFunc("Version", "", getVersion, nullptr, plugin);
+    vspapi->registerFunction("Version", "", "any", getVersion, nullptr, plugin);
 
-    registerFunc("DeviceProperties", "device_id:int:opt;", getDeviceProp, nullptr, plugin);
+    vspapi->registerFunction("DeviceProperties", "device_id:int:opt;", "any", getDeviceProp, nullptr, plugin);
 }
