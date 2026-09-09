@@ -1107,13 +1107,18 @@ static void VS_CC vsOrtCreate(
                 fp16_blacklist_ops.emplace(vsapi->mapGetData(in, "fp16_blacklist_ops", i, nullptr));
             }
         }
+        std::string fp16_warning;
         convert_float_to_float16(
             onnx_model,
             false,
             fp16_blacklist_ops,
             in_vis.front()->format.bytesPerSample == 4,
-            output_format == 0
+            output_format == 0,
+            &fp16_warning
         );
+        if (!fp16_warning.empty()) {
+            vsapi->logMessage(mtWarning, fp16_warning.c_str(), core);
+        }
     }
 
     rename(onnx_model);

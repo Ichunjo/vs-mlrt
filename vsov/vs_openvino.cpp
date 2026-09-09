@@ -663,7 +663,11 @@ static void VS_CC vsOvCreate(
                 fp16_blacklist_ops.emplace(vsapi->mapGetData(in, "fp16_blacklist_ops", i, nullptr));
             }
         }
-        convert_float_to_float16(onnx_model, false, fp16_blacklist_ops);
+        std::string fp16_warning;
+        convert_float_to_float16(onnx_model, false, fp16_blacklist_ops, true, true, &fp16_warning);
+        if (!fp16_warning.empty()) {
+            vsapi->logMessage(mtWarning, fp16_warning.c_str(), core);
+        }
     }
 
     std::string onnx_data = onnx_model.SerializeAsString();

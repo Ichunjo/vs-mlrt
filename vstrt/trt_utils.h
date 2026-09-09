@@ -12,6 +12,8 @@
 #include <cuda_runtime.h>
 #include <NvInferRuntime.h>
 
+#include <VapourSynth4.h>
+
 #include "cuda_helper.h"
 #include "cuda_utils.h"
 
@@ -48,7 +50,27 @@ struct InferenceInstance {
 class Logger : public nvinfer1::ILogger {
     void log(Severity severity, const char* message) noexcept override {
         if (severity <= verbosity) {
-            std::cerr << message << '\n';
+            if (vsapi && core) {
+                int msgType;
+                switch (severity) {
+                    case Severity::kINTERNAL_ERROR:
+                    case Severity::kERROR:
+                        msgType = mtCritical;
+                        break;
+                    case Severity::kWARNING:
+                        msgType = mtWarning;
+                        break;
+                    case Severity::kINFO:
+                        msgType = mtInformation;
+                        break;
+                    default: // kVERBOSE
+                        msgType = mtDebug;
+                        break;
+                }
+                vsapi->logMessage(msgType, message, core);
+            } else {
+                std::cerr << message << '\n';
+            }
         }
     }
 
@@ -59,8 +81,15 @@ public:
         this->verbosity = value;
     }
 
+    void set_vs_api(const VSAPI *api, VSCore *c) noexcept {
+        this->vsapi = api;
+        this->core = c;
+    }
+
 private:
     Severity verbosity;
+    const VSAPI *vsapi = nullptr;
+    VSCore *core = nullptr;
 };
 
 static inline

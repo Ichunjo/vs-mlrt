@@ -300,7 +300,8 @@ void convert_float_to_float16(
     // const std::optional<std::unordered_set<std::string>> op_block_list = {},
     const std::unordered_set<std::string> & op_block_list,
     bool cast_input,
-    bool cast_output
+    bool cast_output,
+    std::string * warning_out
 ) noexcept {
 
     std::vector<ONNX_NAMESPACE::ValueInfoProto> value_info_list {};
@@ -546,7 +547,9 @@ void convert_float_to_float16(
             convert_tensor_float_to_float16(*value.initializer);
             value_info_list.emplace_back(make_value_info_from_tensor(*value.initializer));
             if (!std::empty(value.fp32_nodes) && !force_fp16_initializers) {
-                std::cerr << "initializer is used by both fp32 and fp16 nodes.";
+                if (warning_out) {
+                    *warning_out = "initializer is used by both fp32 and fp16 nodes.";
+                }
             }
         }
     }

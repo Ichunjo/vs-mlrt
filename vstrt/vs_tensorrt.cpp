@@ -394,6 +394,7 @@ static void VS_CC vsTrtCreate(
         logger = std::make_unique<Logger>();
     }
     logger->set_verbosity(static_cast<nvinfer1::ILogger::Severity>(verbosity));
+    logger->set_vs_api(vsapi, core);
 
     auto flexible_output_prop = vsapi->mapGetData(in, "flexible_output_prop", 0, &error);
     if (!error) {

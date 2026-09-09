@@ -681,8 +681,8 @@ static void VS_CC vsMIGXFree(
         vsapi->freeNode(node);
     }
 
-    auto set_error = [](const std::string & error_message) {
-        fprintf(stderr, "%s\n", error_message.c_str());
+    auto set_error = [&](const std::string & error_message) {
+        vsapi->logMessage(mtWarning, error_message.c_str(), core);
     };
 
     checkError(migraphx_program_destroy(d->program));

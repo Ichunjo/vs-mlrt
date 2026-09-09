@@ -15,7 +15,8 @@ void convert_float_to_float16(
     // const std::optional<std::unordered_set<std::string>> op_block_list = {},
     const std::unordered_set<std::string> & op_block_list,
     bool cast_input = true,
-    bool cast_output = true
+    bool cast_output = true,
+    std::string * warning_out = nullptr
 ) noexcept;
 
 #endif
