@@ -4,7 +4,7 @@ The vs-onnxruntime plugin provides optimized CPU & CUDA runtime for some popular
 
 ## Usage
 
-Prototype: `core.ort.Model(clip[] clips, string network_path[, int[] overlap = None, int[] tilesize = None, string provider = "", int device_id = 0, int verbosity = 2, bint cudnn_benchmark = True, bint fp16 = False, bint path_is_serialization = False, bint use_cuda_graph = False])`
+Prototype: `core.ort.Model(clip[] clips, string network_path[, int[] overlap = None, int[] tilesize = None, string provider = "", int device_id = 0, int verbosity = 2, bint cudnn_benchmark = False, bint fp16 = False, bint path_is_serialization = False, bint use_cuda_graph = False])`
 
 Arguments:
 
@@ -24,7 +24,7 @@ Arguments:
   - 2: also warnings, `ORT_LOGGING_LEVEL_WARNING`
   - 3: also info, `ORT_LOGGING_LEVEL_INFO`
   - 4: everything, `ORT_LOGGING_LEVEL_VERBOSE`
-- `bint cudnn_benchmark`: whether to let cuDNN use benchmarking to search for the best convolution kernel to use. Default True. It might incur some startup latency.
+- `bint cudnn_benchmark`: whether to let cuDNN use benchmarking to search for the best convolution kernel to use. Default False. It might incur some startup latency.
 - `bint fp16`: whether to quantize model to fp16 for faster and memory efficient computation.
 - `bint path_is_serialization`: whether the `network_path` argument specifies an onnx serialization of type `bytes`.
 - `bint use_cuda_graph`: whether to use CUDA Graphs to improve performance and reduce CPU overhead in CUDA backend. Not all models are supported.
