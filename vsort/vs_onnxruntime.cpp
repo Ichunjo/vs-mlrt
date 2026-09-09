@@ -470,6 +470,9 @@ struct vsOrtData {
     bool use_cuda_graph {};
     std::mutex cuda_graph_mutex;
 
+    std::vector<TileDesc> static_tiles;
+    bool has_static_tiles { false };
+
     std::vector<Resource> resources;
     std::vector<int> tickets;
     std::mutex ticket_lock;
@@ -608,7 +611,11 @@ static const VSFrame *VS_CC vsOrtGetFrame(
             return nullptr;
         };
 
-        auto tiles = generateTiles(src_width, src_height, src_tile_w, src_tile_h, d->overlap_w, d->overlap_h);
+        std::vector<TileDesc> local_tiles;
+        if (!d->has_static_tiles) {
+            local_tiles = generateTiles(src_width, src_height, src_tile_w, src_tile_h, d->overlap_w, d->overlap_h);
+        }
+        const auto & tiles = d->has_static_tiles ? d->static_tiles : local_tiles;
 
 #ifdef ENABLE_CUDA
         if (d->backend == Backend::CUDA) {
@@ -619,11 +626,15 @@ static const VSFrame *VS_CC vsOrtGetFrame(
                 uint8_t * h_input = resource.cuda_buffers[b].h_input;
                 for (const auto & _src_ptr : src_ptrs) {
                     const uint8_t * src_ptr = _src_ptr + tile.y * src_stride + tile.x * src_bytes;
-                    vsh::bitblt(
-                        h_input, src_tile_w_bytes,
-                        src_ptr, src_stride,
-                        src_tile_w_bytes, src_tile_h
-                    );
+                    if (src_tile_w_bytes == static_cast<size_t>(src_stride)) {
+                        memcpy(h_input, src_ptr, src_tile_bytes);
+                    } else {
+                        vsh::bitblt(
+                            h_input, src_tile_w_bytes,
+                            src_ptr, src_stride,
+                            src_tile_w_bytes, src_tile_h
+                        );
+                    }
                     h_input += src_tile_bytes;
                 }
             };
@@ -680,14 +691,20 @@ static const VSFrame *VS_CC vsOrtGetFrame(
                     uint8_t * dst_ptr = dst_ptrs[plane] +
                         h_scale * tile.y * dst_stride + w_scale * tile.x * dst_bytes;
 
-                    vsh::bitblt(
-                        dst_ptr + (tile.y_crop_start * dst_stride + tile.x_crop_start * dst_bytes),
-                        dst_stride,
-                        h_output + (tile.y_crop_start * dst_tile_w_bytes + tile.x_crop_start * dst_bytes),
-                        dst_tile_w_bytes,
-                        dst_tile_w_bytes - (tile.x_crop_start + tile.x_crop_end) * dst_bytes,
-                        dst_tile_h - (tile.y_crop_start + tile.y_crop_end)
-                    );
+                    if (tile.x_crop_start == 0 && tile.y_crop_start == 0 &&
+                        tile.x_crop_end == 0 && tile.y_crop_end == 0 &&
+                        dst_tile_w_bytes == static_cast<size_t>(dst_stride)) {
+                        memcpy(dst_ptr, h_output, dst_tile_bytes);
+                    } else {
+                        vsh::bitblt(
+                            dst_ptr + (tile.y_crop_start * dst_stride + tile.x_crop_start * dst_bytes),
+                            dst_stride,
+                            h_output + (tile.y_crop_start * dst_tile_w_bytes + tile.x_crop_start * dst_bytes),
+                            dst_tile_w_bytes,
+                            dst_tile_w_bytes - (tile.x_crop_start + tile.x_crop_end) * dst_bytes,
+                            dst_tile_h - (tile.y_crop_start + tile.y_crop_end)
+                        );
+                    }
 
                     h_output += dst_tile_bytes;
                 }
@@ -1158,6 +1175,11 @@ static void VS_CC vsOrtCreate(
             ExecutionMode::ORT_SEQUENTIAL
         ));
 
+        if (d->backend == Backend::CUDA || d->backend == Backend::DML) {
+            checkError(ortapi->SetIntraOpNumThreads(session_options, 1));
+            checkError(ortapi->SetInterOpNumThreads(session_options, 1));
+        }
+
         // it is important to disable the memory pattern optimization
         // for use in vapoursynth
         //
@@ -1393,6 +1415,11 @@ static void VS_CC vsOrtCreate(
         }
     }
 #endif // ENABLE_CUDA
+
+    if (in_vis.front()->width > 0 && in_vis.front()->height > 0) {
+        d->static_tiles = generateTiles(in_vis.front()->width, in_vis.front()->height, tile_w, tile_h, d->overlap_w, d->overlap_h);
+        d->has_static_tiles = true;
+    }
 
     ortapi->ReleaseMemoryInfo(memory_info);
 
