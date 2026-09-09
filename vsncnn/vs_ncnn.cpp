@@ -102,14 +102,14 @@ struct Resource {
     std::unique_ptr<ncnn::VkCompute> cmd;
     ncnn::VkAllocator* blob_vkallocator;
     ncnn::VkAllocator* staging_vkallocator;
-    ncnn::Mat h_src_fp32;
-    ncnn::Mat h_src;
-    ncnn::VkMat d_src_fp32;
-    ncnn::VkMat d_src;
-    ncnn::VkMat d_dst;
-    ncnn::VkMat d_dst_fp32;
-    ncnn::Mat h_dst;
-    ncnn::Mat h_dst_fp32;
+    std::vector<ncnn::Mat> h_src_fp32;
+    std::vector<ncnn::Mat> h_src;
+    std::vector<ncnn::VkMat> d_src_fp32;
+    std::vector<ncnn::VkMat> d_src;
+    std::vector<ncnn::VkMat> d_dst;
+    std::vector<ncnn::VkMat> d_dst_fp32;
+    std::vector<ncnn::Mat> h_dst;
+    std::vector<ncnn::Mat> h_dst_fp32;
     std::vector<const uint8_t*> src_ptrs;
     std::vector<uint8_t*> dst_ptrs;
 };
@@ -122,6 +122,7 @@ struct vsNcnnData {
     std::vector<const VSVideoInfo*> in_vis;
     std::vector<TileDesc> tile_grid;
     bool fp16_input{false};
+    int batch_tiles{4};
 
     int overlap_w, overlap_h;
 
@@ -266,55 +267,61 @@ static const VSFrame* VS_CC vsNcnnGetFrame(
         opt.workspace_vkallocator = resource.blob_vkallocator;
         opt.staging_vkallocator = resource.staging_vkallocator;
 
-        for (const auto& tile : d->tile_grid) {
-            int x = tile.x;
-            int y = tile.y;
-            int x_crop_start = tile.x_crop_start;
-            int x_crop_end = tile.x_crop_end;
-            int y_crop_start = tile.y_crop_start;
-            int y_crop_end = tile.y_crop_end;
+        const size_t total_tiles = d->tile_grid.size();
+        const size_t batch_size = std::min(static_cast<size_t>(d->batch_tiles), total_tiles);
 
-            {
-                const auto& input_mat = d->fp16 && !fp16_input ? resource.h_src_fp32 : resource.h_src;
-                auto input_buffer = reinterpret_cast<uint8_t*>(input_mat.data);
+        for (size_t tile_idx = 0; tile_idx < total_tiles; tile_idx += batch_size) {
+            const size_t cur_batch = std::min(batch_size, total_tiles - tile_idx);
 
-                // assumes the pitches of ncnn::Mat to be
-                // (cstep * elemsize, w * h * elemsize, h * elemsize)
-                for (const auto& _src_ptr : src_ptrs) {
-                    const uint8_t* src_ptr{_src_ptr + y * src_stride + x * src_bytes};
+            std::vector<ncnn::Extractor> extractors;
+            extractors.reserve(cur_batch);
 
-                    if (src_tile_w_bytes == src_stride) {
-                        std::memcpy(input_buffer, src_ptr, src_tile_w_bytes * src_tile_h);
-                    } else {
-                        vsh::bitblt(
-                            input_buffer, src_tile_w_bytes, src_ptr, src_stride, src_tile_w_bytes, src_tile_h
-                        );
+            for (size_t b = 0; b < cur_batch; ++b) {
+                const auto& tile = d->tile_grid[tile_idx + b];
+                int x = tile.x;
+                int y = tile.y;
+
+                {
+                    const auto& input_mat = d->fp16 && !fp16_input ? resource.h_src_fp32[b] : resource.h_src[b];
+                    auto input_buffer = reinterpret_cast<uint8_t*>(input_mat.data);
+
+                    // assumes the pitches of ncnn::Mat to be
+                    // (cstep * elemsize, w * h * elemsize, h * elemsize)
+                    for (const auto& _src_ptr : src_ptrs) {
+                        const uint8_t* src_ptr{_src_ptr + y * src_stride + x * src_bytes};
+
+                        if (src_tile_w_bytes == src_stride) {
+                            std::memcpy(input_buffer, src_ptr, src_tile_w_bytes * src_tile_h);
+                        } else {
+                            vsh::bitblt(
+                                input_buffer, src_tile_w_bytes, src_ptr, src_stride, src_tile_w_bytes, src_tile_h
+                            );
+                        }
+                        input_buffer += input_mat.cstep * input_mat.elemsize;
                     }
-                    input_buffer += input_mat.cstep * input_mat.elemsize;
                 }
-            }
 
-            if (d->fp16 && !fp16_input) {
-                resource.cmd->record_clone(resource.h_src_fp32, resource.d_src_fp32, opt);
-                d->device->convert_packing(resource.d_src_fp32, resource.d_src, 1, 2, *resource.cmd, opt);
-            } else {
-                resource.cmd->record_clone(resource.h_src, resource.d_src, opt);
-            }
+                if (d->fp16 && !fp16_input) {
+                    resource.cmd->record_clone(resource.h_src_fp32[b], resource.d_src_fp32[b], opt);
+                    d->device->convert_packing(resource.d_src_fp32[b], resource.d_src[b], 1, 2, *resource.cmd, opt);
+                } else {
+                    resource.cmd->record_clone(resource.h_src[b], resource.d_src[b], opt);
+                }
 
-            {
                 auto extractor = d->net.create_extractor();
                 extractor.set_blob_vkallocator(resource.blob_vkallocator);
                 extractor.set_workspace_vkallocator(resource.blob_vkallocator);
                 extractor.set_staging_vkallocator(resource.staging_vkallocator);
-                extractor.input(d->input_index, resource.d_src);
-                extractor.extract(d->output_index, resource.d_dst, *resource.cmd);
-            }
+                extractor.input(d->input_index, resource.d_src[b]);
+                extractor.extract(d->output_index, resource.d_dst[b], *resource.cmd);
+                extractors.emplace_back(std::move(extractor));
 
-            if (d->fp16 && !d->fp16_output) {
-                d->device->convert_packing(resource.d_dst, resource.d_dst_fp32, 1, 1, *resource.cmd, opt);
-                resource.cmd->record_clone(resource.d_dst_fp32, resource.h_dst_fp32, opt);
-            } else {
-                resource.cmd->record_clone(resource.d_dst, resource.h_dst, opt);
+                if (d->fp16 && !d->fp16_output) {
+                    d->device->convert_packing(resource.d_dst[b], resource.d_dst_fp32[b], 1, 1, *resource.cmd, opt);
+                    resource.cmd->record_clone(resource.d_dst_fp32[b], resource.h_dst_fp32[b], opt);
+                } else {
+                    resource.cmd->record_clone(resource.d_dst[b], resource.h_dst[b], opt);
+                }
             }
 
             if (resource.cmd->submit_and_wait() != 0) {
@@ -325,8 +332,18 @@ static const VSFrame* VS_CC vsNcnnGetFrame(
                 return set_error("cmd reset failed");
             }
 
-            {
-                const auto& output_mat = d->fp16 && !d->fp16_output ? resource.h_dst_fp32 : resource.h_dst;
+            extractors.clear();
+
+            for (size_t b = 0; b < cur_batch; ++b) {
+                const auto& tile = d->tile_grid[tile_idx + b];
+                int x = tile.x;
+                int y = tile.y;
+                int x_crop_start = tile.x_crop_start;
+                int x_crop_end = tile.x_crop_end;
+                int y_crop_start = tile.y_crop_start;
+                int y_crop_end = tile.y_crop_end;
+
+                const auto& output_mat = d->fp16 && !d->fp16_output ? resource.h_dst_fp32[b] : resource.h_dst[b];
                 auto output_buffer = reinterpret_cast<uint8_t*>(output_mat.data);
 
                 for (int plane = 0; plane < dst_planes; ++plane) {
@@ -607,6 +624,12 @@ static void VS_CC vsNcnnCreate(const VSMap* in, VSMap* out, void* userData, VSCo
     d->tile_grid =
         generateTiles(in_vis.front()->width, in_vis.front()->height, d->in_tile_w, d->in_tile_h, d->overlap_w, d->overlap_h);
 
+    int batch_tiles = vsapi->mapGetIntSaturated(in, "batch_tiles", 0, &error);
+    if (error || batch_tiles <= 0) {
+        batch_tiles = 4;
+    }
+    d->batch_tiles = std::max(1, std::min(batch_tiles, static_cast<int>(d->tile_grid.size())));
+
     size_t bps = 4;
     if (d->fp16) {
         bps = 2;
@@ -617,18 +640,36 @@ static void VS_CC vsNcnnCreate(const VSMap* in, VSMap* out, void* userData, VSCo
         resource.cmd = std::make_unique<ncnn::VkCompute>(d->device);
         resource.blob_vkallocator = d->device->acquire_blob_allocator();
         resource.staging_vkallocator = d->device->acquire_staging_allocator();
-        resource.h_src.create(d->in_tile_w, d->in_tile_h, d->in_tile_c, bps);
-        resource.d_src.create(d->in_tile_w, d->in_tile_h, d->in_tile_c, bps, resource.blob_vkallocator);
-        resource.d_dst.create(d->out_tile_w, d->out_tile_h, d->out_tile_c, bps, resource.blob_vkallocator);
-        resource.h_dst.create(d->out_tile_w, d->out_tile_h, d->out_tile_c, bps);
+
+        resource.h_src.resize(d->batch_tiles);
+        resource.d_src.resize(d->batch_tiles);
+        resource.d_dst.resize(d->batch_tiles);
+        resource.h_dst.resize(d->batch_tiles);
         if (d->fp16) {
             if (in_vis[0]->format.bitsPerSample == 32) {
-                resource.h_src_fp32.create(d->in_tile_w, d->in_tile_h, d->in_tile_c, sizeof(float));
-                resource.d_src_fp32.create(d->in_tile_w, d->in_tile_h, d->in_tile_c, sizeof(float), resource.blob_vkallocator);
+                resource.h_src_fp32.resize(d->batch_tiles);
+                resource.d_src_fp32.resize(d->batch_tiles);
             }
             if (d->out_vi->format.bitsPerSample == 32) {
-                resource.h_dst_fp32.create(d->out_tile_w, d->out_tile_h, d->out_tile_c, sizeof(float));
-                resource.d_dst_fp32.create(d->out_tile_w, d->out_tile_h, d->out_tile_c, sizeof(float), resource.blob_vkallocator);
+                resource.h_dst_fp32.resize(d->batch_tiles);
+                resource.d_dst_fp32.resize(d->batch_tiles);
+            }
+        }
+
+        for (int b = 0; b < d->batch_tiles; ++b) {
+            resource.h_src[b].create(d->in_tile_w, d->in_tile_h, d->in_tile_c, bps);
+            resource.d_src[b].create(d->in_tile_w, d->in_tile_h, d->in_tile_c, bps, resource.blob_vkallocator);
+            resource.d_dst[b].create(d->out_tile_w, d->out_tile_h, d->out_tile_c, bps, resource.blob_vkallocator);
+            resource.h_dst[b].create(d->out_tile_w, d->out_tile_h, d->out_tile_c, bps);
+            if (d->fp16) {
+                if (in_vis[0]->format.bitsPerSample == 32) {
+                    resource.h_src_fp32[b].create(d->in_tile_w, d->in_tile_h, d->in_tile_c, sizeof(float));
+                    resource.d_src_fp32[b].create(d->in_tile_w, d->in_tile_h, d->in_tile_c, sizeof(float), resource.blob_vkallocator);
+                }
+                if (d->out_vi->format.bitsPerSample == 32) {
+                    resource.h_dst_fp32[b].create(d->out_tile_w, d->out_tile_h, d->out_tile_c, sizeof(float));
+                    resource.d_dst_fp32[b].create(d->out_tile_w, d->out_tile_h, d->out_tile_c, sizeof(float), resource.blob_vkallocator);
+                }
             }
         }
         resource.src_ptrs.reserve(d->in_tile_c);
@@ -779,7 +820,8 @@ VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI* vspapi) {
         "fp16:int:opt;"
         "path_is_serialization:int:opt;"
         "flexible_output_prop:data:opt;"
-        "output_format:int:opt;",
+        "output_format:int:opt;"
+        "batch_tiles:int:opt;",
         "any",
         vsNcnnCreate,
         nullptr,
