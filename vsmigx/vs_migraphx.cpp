@@ -1027,7 +1027,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
         "device_id:int:opt;"
         "num_streams:int:opt;"
         "flexible_output_prop:data:opt;",
-        "clip:vnode;",
+        "any",
         vsMIGXCreate,
         nullptr,
         plugin

@@ -811,7 +811,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
         "path_is_serialization:int:opt;"
         "flexible_output_prop:data:opt;"
         "output_format:int:opt;",
-        "clip:vnode;",
+        "any",
         vsNcnnCreate,
         nullptr,
         plugin

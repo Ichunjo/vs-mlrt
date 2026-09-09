@@ -1460,7 +1460,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
         "ml_program:int:opt;"
 #endif
         ,
-        "clip:vnode;",
+        "any",
         vsOrtCreate,
         nullptr,
         plugin

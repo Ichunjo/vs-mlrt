@@ -651,7 +651,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
         "num_streams:int:opt;"
         "verbosity:int:opt;"
         "flexible_output_prop:data:opt;",
-        "clip:vnode;",
+        "any",
         vsTrtCreate,
         nullptr,
         plugin

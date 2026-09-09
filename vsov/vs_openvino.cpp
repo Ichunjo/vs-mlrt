@@ -785,7 +785,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
         "dot_path:data:opt;"
 #endif
         "flexible_output_prop:data:opt;",
-        "clip:vnode;",
+        "any",
         vsOvCreate,
         nullptr,
         plugin
