@@ -426,7 +426,7 @@ std::optional<ErrorMessage> checkEngine(
     if (input_dims.nbDims != 4) {
         return "expects network with 4-D input";
     }
-    if (input_dims.d[0] != 1) {
+    if (input_dims.d[0] != 1 && input_dims.d[0] != -1) {
         return "batch size of network input must be 1";
     }
 
@@ -439,7 +439,7 @@ std::optional<ErrorMessage> checkEngine(
     if (output_dims.nbDims != 4) {
         return "expects network with 4-D output";
     }
-    if (output_dims.d[0] != 1) {
+    if (output_dims.d[0] != 1 && output_dims.d[0] != -1) {
         return "batch size of network output must be 1";
     }
 
