@@ -1,10 +1,19 @@
 #ifdef _MSC_VER
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
+#include <windows.h>
+
 #include <delayimp.h>
+
 #include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <vector>
-#include <windows.h>
 
 #if defined(TRT_MAJOR_RTX)
 #define DLL_DIR L"../../../tensorrt_rtx_libs"

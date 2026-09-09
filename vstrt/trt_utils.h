@@ -1,9 +1,6 @@
 #ifndef VSTRT_TRT_UTILS_H_
 #define VSTRT_TRT_UTILS_H_
 
-#include "cuda_helper.h"
-#include "cuda_utils.h"
-
 #include <NvInferRuntime.h>
 #include <VapourSynth4.h>
 #include <array>
@@ -14,6 +11,9 @@
 #include <optional>
 #include <string>
 #include <variant>
+
+#include "cuda_helper.h"
+#include "cuda_utils.h"
 
 using ErrorMessage = std::string;
 

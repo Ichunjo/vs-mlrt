@@ -1,15 +1,15 @@
 #ifndef VSTRT_INFERENCE_HELPER_H_
 #define VSTRT_INFERENCE_HELPER_H_
 
-#include "cuda_helper.h"
-#include "trt_utils.h"
-
 #include <VSHelper4.h>
 #include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
+
+#include "cuda_helper.h"
+#include "trt_utils.h"
 
 struct InputInfo {
     int width;

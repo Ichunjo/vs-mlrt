@@ -19,15 +19,14 @@
 #include <VSConstants4.h>
 #include <VSHelper4.h>
 #include <VapourSynth4.h>
+#include <gpu.h>
+#include <net.h>
+#include <onnx/common/version.h>
 
 // ncnn
 #include "../common/onnx_utils.h"
 #include "inference_helper.h"
 #include "onnx2ncnn.hpp"
-
-#include <gpu.h>
-#include <net.h>
-#include <onnx/common/version.h>
 
 #ifndef PLUGIN_VERSION_MAJOR
 #define PLUGIN_VERSION_MAJOR 1

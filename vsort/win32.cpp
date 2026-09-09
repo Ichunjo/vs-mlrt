@@ -1,12 +1,21 @@
 #ifdef _MSC_VER
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
+#include <windows.h>
+
 #include <delayimp.h>
+
 #include <filesystem>
 #include <iostream>
 #include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
-#include <windows.h>
 
 #define DLL_DIR L"vsort"
 #define COMMON_CUDA_DIR L"vsmlrt-cuda"
