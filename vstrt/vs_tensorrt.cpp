@@ -152,12 +152,8 @@ static const VSFrame *VS_CC vsTrtGetFrame(
         const int ticket { d->acquire() };
         InferenceInstance & instance { d->instances[ticket] };
 
-#if NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
         auto input_name = d->engines[0]->getIOTensorName(0);
         const nvinfer1::Dims src_dim { instance.exec_context->getTensorShape(input_name) };
-#else // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
-        const nvinfer1::Dims src_dim { instance.exec_context->getBindingDimensions(0) };
-#endif // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
 
         const int src_planes { static_cast<int>(src_dim.d[1]) };
         const int src_tile_h { static_cast<int>(src_dim.d[2]) };
@@ -178,12 +174,8 @@ static const VSFrame *VS_CC vsTrtGetFrame(
 
         std::vector<VSFrame *> dst_frames;
 
-#if NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
         auto output_name = d->engines[0]->getIOTensorName(1);
         const nvinfer1::Dims dst_dim { instance.exec_context->getTensorShape(output_name) };
-#else // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
-        const nvinfer1::Dims dst_dim { instance.exec_context->getBindingDimensions(1) };
-#endif // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
 
         const int dst_planes { static_cast<int>(dst_dim.d[1]) };
         const int dst_tile_h { static_cast<int>(dst_dim.d[2]) };
@@ -391,7 +383,7 @@ static void VS_CC vsTrtCreate(
 
     d->num_streams = vsapi->mapGetIntSaturated(in, "num_streams", 0, &error);
     if (error) {
-        d->num_streams = 1;
+        d->num_streams = 2;
     }
 
     int verbosity = vsapi->mapGetIntSaturated(in, "verbosity", 0, &error);
@@ -409,8 +401,7 @@ static void VS_CC vsTrtCreate(
     }
 
 #ifdef USE_NVINFER_PLUGIN
-    // related to https://github.com/AmusementClub/vs-mlrt/discussions/65, for unknown reason
-#if !(NV_TENSORRT_MAJOR == 9 && defined(_WIN32)) && !defined(TRT_MAJOR_RTX)
+#if !defined(TRT_MAJOR_RTX)
     if (!initLibNvInferPlugins(logger.get(), "")) {
         vsapi->logMessage(mtWarning, "vstrt: Initialize TensorRT plugins failed", core);
     }
@@ -490,7 +481,6 @@ static void VS_CC vsTrtCreate(
     auto maybe_profile_index = selectProfile(d->engines[0], tile_size);
 
     bool is_dynamic = false;
-#if NV_TENSORRT_MAJOR >= 10 || defined(TRT_MAJOR_RTX)
     {
         auto input_name = d->engines[0]->getIOTensorName(0);
         auto input_shape = d->engines[0]->getTensorShape(input_name);
@@ -501,7 +491,6 @@ static void VS_CC vsTrtCreate(
             }
         }
     }
-#endif // NV_TENSORRT_MAJOR >= 10 || defined(TRT_MAJOR_RTX)
 
     d->instances.reserve(d->num_streams);
     for (int i = 0; i < d->num_streams; ++i) {
@@ -512,23 +501,6 @@ static void VS_CC vsTrtCreate(
             d->use_cuda_graph,
             is_dynamic
         );
-
-        // https://docs.nvidia.com/deeplearning/tensorrt/archives/tensorrt-1000-ea/developer-guide/index.html#perform-inference
-#if NV_TENSORRT_MAJOR < 10 && !defined(TRT_MAJOR_RTX)
-        // duplicates ICudaEngine instances
-        //
-        // According to
-        // https://docs.nvidia.com/deeplearning/tensorrt/archives/tensorrt-821/developer-guide/index.html#perform-inference
-        // each optimization profile can only have one execution context when using dynamic shapes
-        if (is_dynamic && i < d->num_streams - 1) {
-            auto maybe_engine = initEngine(engine_data.get(), engine_nbytes, d->runtime, !d->flexible_output_prop.empty());
-            if (std::holds_alternative<std::unique_ptr<nvinfer1::ICudaEngine>>(maybe_engine)) {
-                d->engines.push_back(std::move(std::get<std::unique_ptr<nvinfer1::ICudaEngine>>(maybe_engine)));
-            } else {
-                return set_error(std::get<ErrorMessage>(maybe_engine));
-            }
-        }
-#endif // NV_TENSORRT_MAJOR < 10 && !defined(TRT_MAJOR_RTX)
 
         if (std::holds_alternative<InferenceInstance>(maybe_instance)) {
             auto instance = std::move(std::get<InferenceInstance>(maybe_instance));
@@ -547,12 +519,8 @@ static void VS_CC vsTrtCreate(
         d->tickets.push_back(i);
     }
 
-#if NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
     auto input_name = d->engines[0]->getIOTensorName(0);
     auto input_type = d->engines[0]->getTensorDataType(input_name);
-#else // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
-    auto input_type = d->engines[0]->getBindingDataType(0);
-#endif // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
 
     VSSampleType input_sample_type;
     {
@@ -573,12 +541,8 @@ static void VS_CC vsTrtCreate(
 
     d->out_vi = std::make_unique<VSVideoInfo>(*in_vis[0]);
 
-#if NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
     auto output_name = d->engines[0]->getIOTensorName(1);
     auto output_type = d->engines[0]->getTensorDataType(output_name);
-#else // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
-    auto output_type = d->engines[0]->getBindingDataType(1);
-#endif // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
 
     VSSampleType output_sample_type;
     {
@@ -601,11 +565,7 @@ static void VS_CC vsTrtCreate(
 
     if (!d->flexible_output_prop.empty()) {
         const auto & exec_context = d->instances[0].exec_context;
-        #if NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
-            const nvinfer1::Dims & out_dims = exec_context->getTensorShape(output_name);
-        #else // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
-            const nvinfer1::Dims & out_dims = exec_context->getBindingDimensions(1);
-        #endif // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
+        const nvinfer1::Dims & out_dims = exec_context->getTensorShape(output_name);
         vsapi->mapSetInt(out, "num_planes", out_dims.d[1], maReplace);
     }
 
@@ -651,54 +611,34 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
         plugin
     );
 
-    // TRT 9 for windows does not export getInferLibVersion()
-#if NV_TENSORRT_MAJOR == 9 && defined(_WIN32) && !defined(TRT_MAJOR_RTX)
-    auto test = getPluginRegistry();
-
-    if (test == nullptr) {
-        std::fprintf(stderr, "vstrt: TensorRT failed to load.\n");
-        return;
-    }
-#else // NV_TENSORRT_MAJOR == 9 && defined(_WIN32) && !defined(TRT_MAJOR_RTX)
-    int ver = getInferLibVersion(); // must ensure this is the first nvinfer function called
+    int ver = getInferLibVersion();
 #ifdef _WIN32
+    if (ver == 0) {
 #if defined(TRT_MAJOR_RTX)
-    if (ver == 0) { // a sentinel value, see dummy function in win32.cpp.
-        std::fprintf(stderr, "vstrt_rtx: TensorRT failed to load.\n");
-        return;
-    }
+        std::fprintf(stderr, "vstrt_rtx: TensorRT-RTX failed to load.\n");
 #else
-    if (ver == 0) { // a sentinel value, see dummy function in win32.cpp.
         std::fprintf(stderr, "vstrt: TensorRT failed to load.\n");
+#endif
         return;
     }
-#endif
 #endif // _WIN32
     if (ver != NV_TENSORRT_VERSION) {
 #if defined(TRT_MAJOR_RTX)
         std::fprintf(
             stderr,
             "vstrt_rtx: TensorRT-RTX version mismatch, built with %ld but loaded with %d; continue but fingers crossed...\n",
-            NV_TENSORRT_VERSION,
-            ver
-        );
-#elif NV_TENSORRT_MAJOR >= 10
-        std::fprintf(
-            stderr,
-            "vstrt: TensorRT version mismatch, built with %ld but loaded with %d; continue but fingers crossed...\n",
-            NV_TENSORRT_VERSION,
+            static_cast<long>(NV_TENSORRT_VERSION),
             ver
         );
 #else
         std::fprintf(
             stderr,
-            "vstrt: TensorRT version mismatch, built with %d but loaded with %d; continue but fingers crossed...\n",
-            NV_TENSORRT_VERSION,
+            "vstrt: TensorRT version mismatch, built with %ld but loaded with %d; continue but fingers crossed...\n",
+            static_cast<long>(NV_TENSORRT_VERSION),
             ver
         );
 #endif
     }
-#endif // NV_TENSORRT_MAJOR == 9 && defined(_WIN32) && !defined(TRT_MAJOR_RTX)
 
     vspapi->registerFunction(
         "Model",
@@ -722,11 +662,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
 
         vsapi->mapSetData(
             out, "tensorrt_version",
-#if NV_TENSORRT_MAJOR == 9 && defined(_WIN32) && !defined(TRT_MAJOR_RTX)
-            std::to_string(NV_TENSORRT_VERSION).c_str(), 
-#else
             std::to_string(getInferLibVersion()).c_str(), 
-#endif
             -1, dtUtf8, maReplace
         );
 
