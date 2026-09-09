@@ -352,19 +352,14 @@ static const VSFrame* VS_CC vsNcnnGetFrame(
                     int copy_w_bytes = dst_tile_w_bytes - (x_crop_start + x_crop_end) * dst_bytes;
                     int copy_h = dst_tile_h - (y_crop_start + y_crop_end);
                     uint8_t* dst_tile_ptr = dst_ptr + (y_crop_start * dst_stride + x_crop_start * dst_bytes);
-                    const uint8_t* src_tile_ptr = output_buffer + (y_crop_start * dst_tile_w_bytes + x_crop_start * dst_bytes);
+                    const uint8_t* src_tile_ptr =
+                        output_buffer + (y_crop_start * dst_tile_w_bytes + x_crop_start * dst_bytes);
 
-                    if (x_crop_start == 0 && x_crop_end == 0 && y_crop_start == 0 && y_crop_end == 0 && dst_tile_w_bytes == dst_stride) {
+                    if (x_crop_start == 0 && x_crop_end == 0 && y_crop_start == 0 && y_crop_end == 0 &&
+                        dst_tile_w_bytes == dst_stride) {
                         std::memcpy(dst_tile_ptr, src_tile_ptr, dst_tile_w_bytes * dst_tile_h);
                     } else {
-                        vsh::bitblt(
-                            dst_tile_ptr,
-                            dst_stride,
-                            src_tile_ptr,
-                            dst_tile_w_bytes,
-                            copy_w_bytes,
-                            copy_h
-                        );
+                        vsh::bitblt(dst_tile_ptr, dst_stride, src_tile_ptr, dst_tile_w_bytes, copy_w_bytes, copy_h);
                     }
 
                     output_buffer += output_mat.cstep * output_mat.elemsize;
@@ -621,8 +616,9 @@ static void VS_CC vsNcnnCreate(const VSMap* in, VSMap* out, void* userData, VSCo
 
     d->in_vis = in_vis;
     d->fp16_input = in_vis[0]->format.bitsPerSample == 16;
-    d->tile_grid =
-        generateTiles(in_vis.front()->width, in_vis.front()->height, d->in_tile_w, d->in_tile_h, d->overlap_w, d->overlap_h);
+    d->tile_grid = generateTiles(
+        in_vis.front()->width, in_vis.front()->height, d->in_tile_w, d->in_tile_h, d->overlap_w, d->overlap_h
+    );
 
     int batch_tiles = vsapi->mapGetIntSaturated(in, "batch_tiles", 0, &error);
     if (error || batch_tiles <= 0) {
@@ -664,11 +660,15 @@ static void VS_CC vsNcnnCreate(const VSMap* in, VSMap* out, void* userData, VSCo
             if (d->fp16) {
                 if (in_vis[0]->format.bitsPerSample == 32) {
                     resource.h_src_fp32[b].create(d->in_tile_w, d->in_tile_h, d->in_tile_c, sizeof(float));
-                    resource.d_src_fp32[b].create(d->in_tile_w, d->in_tile_h, d->in_tile_c, sizeof(float), resource.blob_vkallocator);
+                    resource.d_src_fp32[b].create(
+                        d->in_tile_w, d->in_tile_h, d->in_tile_c, sizeof(float), resource.blob_vkallocator
+                    );
                 }
                 if (d->out_vi->format.bitsPerSample == 32) {
                     resource.h_dst_fp32[b].create(d->out_tile_w, d->out_tile_h, d->out_tile_c, sizeof(float));
-                    resource.d_dst_fp32[b].create(d->out_tile_w, d->out_tile_h, d->out_tile_c, sizeof(float), resource.blob_vkallocator);
+                    resource.d_dst_fp32[b].create(
+                        d->out_tile_w, d->out_tile_h, d->out_tile_c, sizeof(float), resource.blob_vkallocator
+                    );
                 }
             }
         }
