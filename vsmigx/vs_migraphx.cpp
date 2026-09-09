@@ -5,6 +5,7 @@
 #include <atomic>
 #include <concepts>
 #include <cstdint>
+#include <cstring>
 #include <hip/hip_runtime.h>
 #include <memory>
 #include <migraphx/migraphx.h>
@@ -188,7 +189,8 @@ static inline void VS_CC getDeviceProp(const VSMap* in, VSMap* out, void* userDa
         if constexpr (std::is_integral_v<T>) {
             vsapi->mapSetInt(out, name, static_cast<int64_t>(value), maReplace);
         } else if constexpr (std::is_same_v<T, char*> || std::is_same_v<T, const char*>) {
-            vsapi->mapSetData(out, name, value, data_length, dtUtf8, maReplace);
+            int size = data_length >= 0 ? data_length : static_cast<int>(std::strlen(value));
+            vsapi->mapSetData(out, name, value, size, dtBinary, maReplace);
         }
     };
 
@@ -312,7 +314,7 @@ template <typename T, auto deleter>
     requires std::default_initializable<T> && std::movable<T> && std::is_trivially_copy_assignable_v<T> &&
              std::convertible_to<T, bool> && std::invocable<decltype(deleter), T>
 struct Resource {
-    T data;
+    T data{};
 
     [[nodiscard]]
     constexpr Resource() noexcept = default;
@@ -360,13 +362,35 @@ struct MemoryResource {
     size_t size;
 };
 
+using EventResource = Resource<hipEvent_t, hipEventDestroy>;
+using ArgumentsResource = Resource<migraphx_arguments_t, migraphx_arguments_destroy>;
+
+constexpr int kNumBuffers = 3;
+
+struct TileDesc {
+    int x;
+    int y;
+    int x_crop_start;
+    int x_crop_end;
+    int y_crop_start;
+    int y_crop_end;
+};
+
 struct InferenceInstance {
-    MemoryResource src;
-    MemoryResource dst;
-    Resource<migraphx_program_parameters_t, migraphx_program_parameters_destroy> params;
-    Resource<migraphx_argument_t, migraphx_argument_destroy> src_argument;
-    Resource<migraphx_argument_t, migraphx_argument_destroy> dst_argument;
-    Resource<hipStream_t, hipStreamDestroy> stream;
+    std::array<MemoryResource, kNumBuffers> src;
+    std::array<MemoryResource, kNumBuffers> dst;
+    std::array<Resource<migraphx_program_parameters_t, migraphx_program_parameters_destroy>, kNumBuffers> params;
+    std::array<Resource<migraphx_argument_t, migraphx_argument_destroy>, kNumBuffers> src_argument;
+    std::array<Resource<migraphx_argument_t, migraphx_argument_destroy>, kNumBuffers> dst_argument;
+    std::array<ArgumentsResource, kNumBuffers> outputs;
+    // Dedicated streams so H2D copies, MIGraphX compute, and D2H copies
+    // overlap instead of serializing on a single stream.
+    Resource<hipStream_t, hipStreamDestroy> compute;
+    Resource<hipStream_t, hipStreamDestroy> h2d_stream;
+    Resource<hipStream_t, hipStreamDestroy> d2h_stream;
+    std::array<EventResource, kNumBuffers> h2d_done;
+    std::array<EventResource, kNumBuffers> compute_done;
+    std::array<EventResource, kNumBuffers> d2h_done;
 };
 
 struct vsMIGXData {
@@ -375,6 +399,11 @@ struct vsMIGXData {
 
     std::array<int, 4> src_tile_shape, dst_tile_shape;
     int overlap_w, overlap_h;
+
+    // Static tile grid: frame dimensions, tile size, and overlap are fixed
+    // for the filter instance, so geometry is computed once at creation
+    // instead of per frame.
+    std::vector<TileDesc> tiles;
 
     int device_id;
 
@@ -435,8 +464,6 @@ static const VSFrame* VS_CC vsMIGXGetFrame(
         }
 
         auto src_stride = vsapi->getStride(src_frames.front(), 0);
-        auto src_width = vsapi->getFrameWidth(src_frames.front(), 0);
-        auto src_height = vsapi->getFrameHeight(src_frames.front(), 0);
         auto src_bytes = vsapi->getVideoFrameFormat(src_frames.front())->bytesPerSample;
 
         VSFrame* const dst_frame =
@@ -462,9 +489,6 @@ static const VSFrame* VS_CC vsMIGXGetFrame(
                 src_ptrs.emplace_back(vsapi->getReadPtr(src_frames[i], j));
             }
         }
-
-        auto step_w = src_tile_w - 2 * d->overlap_w;
-        auto step_h = src_tile_h - 2 * d->overlap_h;
 
         auto dst_tile_h = d->dst_tile_shape[2];
         auto dst_tile_w = d->dst_tile_shape[3];
@@ -510,90 +534,171 @@ static const VSFrame* VS_CC vsMIGXGetFrame(
 
         checkHIPError(hipSetDevice(d->device_id));
 
-        int y = 0;
-        while (true) {
-            int y_crop_start = (y == 0) ? 0 : d->overlap_h;
-            int y_crop_end = (y == src_height - src_tile_h) ? 0 : d->overlap_h;
+        const bool src_contig = (src_stride == src_tile_w_bytes);
+        const bool dst_contig = (dst_stride == dst_tile_w_bytes);
 
-            int x = 0;
-            while (true) {
-                int x_crop_start = (x == 0) ? 0 : d->overlap_w;
-                int x_crop_end = (x == src_width - src_tile_w) ? 0 : d->overlap_w;
+        std::string stage_error;
 
-                {
-                    uint8_t* h_data = instance.src.h_data.data;
-                    for (const uint8_t* _src_ptr : src_ptrs) {
-                        const uint8_t* src_ptr{
-                            _src_ptr + y * src_stride + x * vsapi->getVideoFrameFormat(src_frames[0])->bytesPerSample
-                        };
+        auto pack_tile = [&](size_t tile_idx, int b) -> void {
+            const TileDesc& tile = d->tiles[tile_idx];
+            uint8_t* h_data = instance.src[b].h_data.data;
+            for (const uint8_t* _src_ptr : src_ptrs) {
+                const uint8_t* src_ptr{
+                    _src_ptr + tile.y * src_stride + tile.x * vsapi->getVideoFrameFormat(src_frames[0])->bytesPerSample
+                };
 
-                        vsh::bitblt(h_data, src_tile_w_bytes, src_ptr, src_stride, src_tile_w_bytes, src_tile_h);
-
-                        h_data += src_tile_bytes;
-                    }
+                if (src_contig) {
+                    std::memcpy(h_data, src_ptr, src_tile_bytes);
+                } else {
+                    vsh::bitblt(h_data, src_tile_w_bytes, src_ptr, src_stride, src_tile_w_bytes, src_tile_h);
                 }
 
-                checkHIPError(hipMemcpyAsync(
-                    instance.src.d_data.data,
-                    instance.src.h_data.data,
-                    instance.src.size,
+                h_data += src_tile_bytes;
+            }
+        };
+
+        auto launch_tile = [&](int b) -> bool {
+            // 1. Host-to-Device transfer on the upload stream.
+            if (hipMemcpyAsync(
+                    instance.src[b].d_data.data,
+                    instance.src[b].h_data.data,
+                    instance.src[b].size,
                     hipMemcpyHostToDevice,
-                    instance.stream
-                ));
+                    instance.h2d_stream
+                ) != hipSuccess) {
+                stage_error = "hipMemcpyAsync (H2D) failed";
+                return true;
+            }
+            if (hipEventRecord(instance.h2d_done[b], instance.h2d_stream) != hipSuccess) {
+                stage_error = "hipEventRecord (h2d_done) failed";
+                return true;
+            }
 
-                migraphx_arguments_t outputs;
+            // 2. Compute stream waits for the upload, then runs async.
+            if (hipStreamWaitEvent(instance.compute, instance.h2d_done[b], 0) != hipSuccess) {
+                stage_error = "hipStreamWaitEvent (compute) failed";
+                return true;
+            }
+            {
+                migraphx_arguments_t raw_outputs{};
+                migraphx_status status = migraphx_program_run_async(
+                    &raw_outputs, d->program, instance.params[b], instance.compute.data, "ihipStream_t"
+                );
+                if (status != migraphx_status_success) {
+                    stage_error = "'migraphx_program_run_async' failed: "s + getErrorString(status);
+                    return true;
+                }
+                // Takes ownership; destroyed once the matching download
+                // completes (or on the error path below).
+                instance.outputs[b] = std::move(raw_outputs);
+            }
+            if (hipEventRecord(instance.compute_done[b], instance.compute) != hipSuccess) {
+                stage_error = "hipEventRecord (compute_done) failed";
+                return true;
+            }
 
-#ifdef MIGRAPHX_VERSION_TWEAK
-                checkError(migraphx_program_run_async(
-                    &outputs, d->program, instance.params, instance.stream.data, "ihipStream_t"
-                ));
-#else  // MIGRAPHX_VERSION_TWEAK
-                checkHIPError(hipStreamSynchronize(instance.stream));
-
-                checkError(migraphx_program_run(&outputs, d->program, instance.params));
-#endif // MIGRAPHX_VERSION_TWEAK
-
-                checkHIPError(hipMemcpyAsync(
-                    instance.dst.h_data.data,
-                    instance.dst.d_data.data,
-                    instance.dst.size,
+            // 3. Download stream waits for compute, then transfers back.
+            if (hipStreamWaitEvent(instance.d2h_stream, instance.compute_done[b], 0) != hipSuccess) {
+                stage_error = "hipStreamWaitEvent (d2h) failed";
+                return true;
+            }
+            if (hipMemcpyAsync(
+                    instance.dst[b].h_data.data,
+                    instance.dst[b].d_data.data,
+                    instance.dst[b].size,
                     hipMemcpyDeviceToHost,
-                    instance.stream
-                ));
+                    instance.d2h_stream
+                ) != hipSuccess) {
+                stage_error = "hipMemcpyAsync (D2H) failed";
+                return true;
+            }
+            if (hipEventRecord(instance.d2h_done[b], instance.d2h_stream) != hipSuccess) {
+                stage_error = "hipEventRecord (d2h_done) failed";
+                return true;
+            }
 
-                checkHIPError(hipStreamSynchronize(instance.stream));
+            return false;
+        };
 
-                {
-                    const uint8_t* h_data = instance.dst.h_data.data;
-                    auto bytes_per_sample = vsapi->getVideoFrameFormat(dst_frame)->bytesPerSample;
-                    for (int plane = 0; plane < dst_planes; ++plane) {
-                        uint8_t* dst_ptr{dst_ptrs[plane] + h_scale * y * dst_stride + w_scale * x * dst_bytes};
+        auto unpack_tile = [&](size_t tile_idx, int b) -> bool {
+            const TileDesc& tile = d->tiles[tile_idx];
+            if (hipEventSynchronize(instance.d2h_done[b]) != hipSuccess) {
+                stage_error = "hipEventSynchronize (d2h_done) failed";
+                return true;
+            }
 
-                        vsh::bitblt(
-                            dst_ptr + (y_crop_start * dst_stride + x_crop_start * bytes_per_sample),
-                            dst_stride,
-                            h_data + (y_crop_start * dst_tile_w_bytes + x_crop_start * bytes_per_sample),
-                            dst_tile_w_bytes,
-                            dst_tile_w_bytes - (x_crop_start + x_crop_end) * bytes_per_sample,
-                            dst_tile_h - (y_crop_start + y_crop_end)
+            {
+                const uint8_t* h_data = instance.dst[b].h_data.data;
+                auto bytes_per_sample = vsapi->getVideoFrameFormat(dst_frame)->bytesPerSample;
+                for (int plane = 0; plane < dst_planes; ++plane) {
+                    uint8_t* dst_ptr{dst_ptrs[plane] + h_scale * tile.y * dst_stride + w_scale * tile.x * dst_bytes};
+
+                    const uint8_t* crop_src =
+                        h_data + (tile.y_crop_start * dst_tile_w_bytes + tile.x_crop_start * bytes_per_sample);
+                    uint8_t* crop_dst =
+                        dst_ptr + (tile.y_crop_start * dst_stride + tile.x_crop_start * bytes_per_sample);
+                    int copy_w_bytes = dst_tile_w_bytes - (tile.x_crop_start + tile.x_crop_end) * bytes_per_sample;
+                    int copy_h = dst_tile_h - (tile.y_crop_start + tile.y_crop_end);
+
+                    if (dst_contig && copy_w_bytes == dst_tile_w_bytes) {
+                        std::memcpy(
+                            crop_dst, crop_src, static_cast<size_t>(copy_h) * static_cast<size_t>(dst_tile_w_bytes)
                         );
-
-                        h_data += dst_tile_bytes;
+                    } else {
+                        vsh::bitblt(crop_dst, dst_stride, crop_src, dst_tile_w_bytes, copy_w_bytes, copy_h);
                     }
-                }
 
-                if (x + src_tile_w == src_width) {
-                    break;
+                    h_data += dst_tile_bytes;
                 }
-
-                x = std::min(x + step_w, src_width - src_tile_w);
             }
 
-            if (y + src_tile_h == src_height) {
-                break;
-            }
+            // Result handle no longer needed; the pixels are on the host.
+            instance.outputs[b] = migraphx_arguments_t{};
 
-            y = std::min(y + step_h, src_height - src_tile_h);
+            return false;
+        };
+
+        const size_t num_tiles = std::size(d->tiles);
+
+        // Best-effort recovery for the error paths below: quiesce the
+        // instance's streams, then release any in-flight result handles
+        // (only safe to destroy once their GPU work has completed).
+        auto recover_instance = [&]() -> void {
+            (void)hipStreamSynchronize(instance.compute);
+            (void)hipStreamSynchronize(instance.h2d_stream);
+            (void)hipStreamSynchronize(instance.d2h_stream);
+            for (int b = 0; b < kNumBuffers; ++b) {
+                instance.outputs[b] = migraphx_arguments_t{};
+            }
+        };
+
+        for (size_t i = 0; i < num_tiles; ++i) {
+            int b = static_cast<int>(i % kNumBuffers);
+            if (i >= static_cast<size_t>(kNumBuffers)) {
+                // Buffer b holds tile i - kNumBuffers: wait for and consume
+                // it before reuse. This single CPU wait is what keeps at
+                // most kNumBuffers tiles in flight.
+                if (unpack_tile(i - kNumBuffers, b)) {
+                    recover_instance();
+                    return set_error(stage_error);
+                }
+            }
+            pack_tile(i, b);
+            if (launch_tile(b)) {
+                recover_instance();
+                return set_error(stage_error);
+            }
+        }
+
+        // Drain remaining in-flight tiles.
+        const size_t in_flight = std::min(num_tiles, static_cast<size_t>(kNumBuffers));
+        for (size_t k = in_flight; k > 0; --k) {
+            size_t tile_idx = num_tiles - k;
+            int b = static_cast<int>(tile_idx % kNumBuffers);
+            if (unpack_tile(tile_idx, b)) {
+                recover_instance();
+                return set_error(stage_error);
+            }
         }
 
         d->release(ticket);
@@ -868,28 +973,77 @@ static void VS_CC vsMIGXCreate(const VSMap* in, VSMap* out, void* userData, VSCo
         d->out_vi, d->src_tile_shape, d->dst_tile_shape, bitsPerSample, core, vsapi, !d->flexible_output_prop.empty()
     );
 
+    // Pre-compute the static tile grid once. Frame dimensions, tile size,
+    // and overlap never change for the filter instance.
+    {
+        const int frame_w = in_vis.front()->width;
+        const int frame_h = in_vis.front()->height;
+        const int grid_tile_w = static_cast<int>(tile_w);
+        const int grid_tile_h = static_cast<int>(tile_h);
+        const int step_w = grid_tile_w - 2 * d->overlap_w;
+        const int step_h = grid_tile_h - 2 * d->overlap_h;
+
+        int y = 0;
+        while (true) {
+            int y_crop_start = (y == 0) ? 0 : d->overlap_h;
+            int y_crop_end = (y == frame_h - grid_tile_h) ? 0 : d->overlap_h;
+
+            int x = 0;
+            while (true) {
+                int x_crop_start = (x == 0) ? 0 : d->overlap_w;
+                int x_crop_end = (x == frame_w - grid_tile_w) ? 0 : d->overlap_w;
+
+                d->tiles.push_back(TileDesc{x, y, x_crop_start, x_crop_end, y_crop_start, y_crop_end});
+
+                if (x + grid_tile_w == frame_w) {
+                    break;
+                }
+
+                x = std::min(x + step_w, frame_w - grid_tile_w);
+            }
+
+            if (y + grid_tile_h == frame_h) {
+                break;
+            }
+
+            y = std::min(y + step_h, frame_h - grid_tile_h);
+        }
+    }
+
     // per-stream context
     d->instances.reserve(num_streams);
     for (int i = 0; i < num_streams; ++i) {
         InferenceInstance instance;
 
-        checkHIPError(hipMalloc(&instance.src.d_data.data, input_size));
-        checkHIPError(
-            hipHostMalloc(&instance.src.h_data.data, input_size, hipHostMallocWriteCombined | hipHostMallocNonCoherent)
-        );
-        instance.src.size = input_size;
+        for (int b = 0; b < kNumBuffers; ++b) {
+            checkHIPError(hipMalloc(&instance.src[b].d_data.data, input_size));
+            checkHIPError(hipHostMalloc(
+                &instance.src[b].h_data.data, input_size, hipHostMallocWriteCombined | hipHostMallocNonCoherent
+            ));
+            instance.src[b].size = input_size;
 
-        checkHIPError(hipMalloc(&instance.dst.d_data.data, output_size));
-        checkHIPError(hipHostMalloc(&instance.dst.h_data.data, output_size, hipHostMallocNonCoherent));
-        instance.dst.size = output_size;
+            checkHIPError(hipMalloc(&instance.dst[b].d_data.data, output_size));
+            checkHIPError(hipHostMalloc(&instance.dst[b].h_data.data, output_size, hipHostMallocNonCoherent));
+            instance.dst[b].size = output_size;
 
-        checkError(migraphx_program_parameters_create(&instance.params.data));
-        checkError(migraphx_argument_create(&instance.dst_argument.data, output_shape, instance.dst.d_data.data));
-        checkError(migraphx_program_parameters_add(instance.params, input_name[0], instance.dst_argument));
-        checkError(migraphx_argument_create(&instance.src_argument.data, input_shape, instance.src.d_data.data));
-        checkError(migraphx_program_parameters_add(instance.params, input_name[1], instance.src_argument));
+            checkError(migraphx_program_parameters_create(&instance.params[b].data));
+            checkError(
+                migraphx_argument_create(&instance.dst_argument[b].data, output_shape, instance.dst[b].d_data.data)
+            );
+            checkError(migraphx_program_parameters_add(instance.params[b], input_name[0], instance.dst_argument[b]));
+            checkError(
+                migraphx_argument_create(&instance.src_argument[b].data, input_shape, instance.src[b].d_data.data)
+            );
+            checkError(migraphx_program_parameters_add(instance.params[b], input_name[1], instance.src_argument[b]));
 
-        checkHIPError(hipStreamCreateWithFlags(&instance.stream.data, hipStreamNonBlocking));
+            checkHIPError(hipEventCreateWithFlags(&instance.h2d_done[b].data, hipEventDisableTiming));
+            checkHIPError(hipEventCreateWithFlags(&instance.compute_done[b].data, hipEventDisableTiming));
+            checkHIPError(hipEventCreateWithFlags(&instance.d2h_done[b].data, hipEventDisableTiming));
+        }
+
+        checkHIPError(hipStreamCreateWithFlags(&instance.compute.data, hipStreamNonBlocking));
+        checkHIPError(hipStreamCreateWithFlags(&instance.h2d_stream.data, hipStreamNonBlocking));
+        checkHIPError(hipStreamCreateWithFlags(&instance.d2h_stream.data, hipStreamNonBlocking));
 
         d->instances.emplace_back(std::move(instance));
     }
@@ -927,8 +1081,7 @@ static void VS_CC vsMIGXCreate(const VSMap* in, VSMap* out, void* userData, VSCo
     );
 }
 
-VS_EXTERNAL_API(void)
-VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI* vspapi) {
+VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI* vspapi) {
     vspapi->configPlugin(
         PLUGIN_ID,
         "migx",
