@@ -104,8 +104,10 @@ struct Resource {
     ncnn::VkAllocator* staging_vkallocator;
     ncnn::Mat h_src_fp32;
     ncnn::Mat h_src;
+    ncnn::VkMat d_src_fp32;
     ncnn::VkMat d_src;
     ncnn::VkMat d_dst;
+    ncnn::VkMat d_dst_fp32;
     ncnn::Mat h_dst;
     ncnn::Mat h_dst_fp32;
     std::vector<const uint8_t*> src_ptrs;
@@ -293,10 +295,11 @@ static const VSFrame* VS_CC vsNcnnGetFrame(
             }
 
             if (d->fp16 && !fp16_input) {
-                ncnn::cast_float32_to_float16(resource.h_src_fp32, resource.h_src);
+                resource.cmd->record_clone(resource.h_src_fp32, resource.d_src_fp32, opt);
+                d->device->convert_packing(resource.d_src_fp32, resource.d_src, 1, 2, *resource.cmd, opt);
+            } else {
+                resource.cmd->record_clone(resource.h_src, resource.d_src, opt);
             }
-
-            resource.cmd->record_clone(resource.h_src, resource.d_src, opt);
 
             {
                 auto extractor = d->net.create_extractor();
@@ -307,17 +310,19 @@ static const VSFrame* VS_CC vsNcnnGetFrame(
                 extractor.extract(d->output_index, resource.d_dst, *resource.cmd);
             }
 
-            resource.cmd->record_clone(resource.d_dst, resource.h_dst, opt);
+            if (d->fp16 && !d->fp16_output) {
+                d->device->convert_packing(resource.d_dst, resource.d_dst_fp32, 1, 1, *resource.cmd, opt);
+                resource.cmd->record_clone(resource.d_dst_fp32, resource.h_dst_fp32, opt);
+            } else {
+                resource.cmd->record_clone(resource.d_dst, resource.h_dst, opt);
+            }
+
             if (resource.cmd->submit_and_wait() != 0) {
                 resource.cmd->reset();
                 return set_error("inference failed");
             }
             if (resource.cmd->reset() != 0) {
                 return set_error("cmd reset failed");
-            }
-
-            if (d->fp16 && !d->fp16_output) {
-                ncnn::cast_float16_to_float32(resource.h_dst, resource.h_dst_fp32);
             }
 
             {
@@ -619,9 +624,11 @@ static void VS_CC vsNcnnCreate(const VSMap* in, VSMap* out, void* userData, VSCo
         if (d->fp16) {
             if (in_vis[0]->format.bitsPerSample == 32) {
                 resource.h_src_fp32.create(d->in_tile_w, d->in_tile_h, d->in_tile_c, sizeof(float));
+                resource.d_src_fp32.create(d->in_tile_w, d->in_tile_h, d->in_tile_c, sizeof(float), resource.blob_vkallocator);
             }
             if (d->out_vi->format.bitsPerSample == 32) {
                 resource.h_dst_fp32.create(d->out_tile_w, d->out_tile_h, d->out_tile_c, sizeof(float));
+                resource.d_dst_fp32.create(d->out_tile_w, d->out_tile_h, d->out_tile_c, sizeof(float), resource.blob_vkallocator);
             }
         }
         resource.src_ptrs.reserve(d->in_tile_c);
