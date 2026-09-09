@@ -749,28 +749,19 @@ static const VSFrame *VS_CC vsOrtGetFrame(
 
                 for (const auto & _src_ptr : src_ptrs) {
                     const uint8_t * src_ptr = _src_ptr + tile.y * src_stride + tile.x * src_bytes;
-                    vsh::bitblt(
-                        input_buffer, src_tile_w_bytes,
-                        src_ptr, src_stride,
-                        src_tile_w_bytes, src_tile_h
-                    );
+                    if (src_tile_w_bytes == static_cast<size_t>(src_stride)) {
+                        memcpy(input_buffer, src_ptr, src_tile_bytes);
+                    } else {
+                        vsh::bitblt(
+                            input_buffer, src_tile_w_bytes,
+                            src_ptr, src_stride,
+                            src_tile_w_bytes, src_tile_h
+                        );
+                    }
                     input_buffer += src_tile_bytes;
                 }
 
-                if (d->backend == Backend::CPU) {
-                    checkError(ortapi->RunWithBinding(resource.session, resource.run_options, resource.binding));
-                } else {
-                    checkError(ortapi->Run(
-                        resource.session,
-                        resource.run_options,
-                        &resource.input_name,
-                        &resource.input_tensor,
-                        1,
-                        &resource.output_name,
-                        1,
-                        &resource.output_tensor
-                    ));
-                }
+                checkError(ortapi->RunWithBinding(resource.session, resource.run_options, resource.binding));
 
                 uint8_t * output_buffer;
                 checkError(ortapi->GetTensorMutableData(
@@ -782,14 +773,20 @@ static const VSFrame *VS_CC vsOrtGetFrame(
                     uint8_t * dst_ptr = dst_ptrs[plane] +
                         h_scale * tile.y * dst_stride + w_scale * tile.x * dst_bytes;
 
-                    vsh::bitblt(
-                        dst_ptr + (tile.y_crop_start * dst_stride + tile.x_crop_start * dst_bytes),
-                        dst_stride,
-                        output_buffer + (tile.y_crop_start * dst_tile_w_bytes + tile.x_crop_start * dst_bytes),
-                        dst_tile_w_bytes,
-                        dst_tile_w_bytes - (tile.x_crop_start + tile.x_crop_end) * dst_bytes,
-                        dst_tile_h - (tile.y_crop_start + tile.y_crop_end)
-                    );
+                    if (tile.x_crop_start == 0 && tile.y_crop_start == 0 &&
+                        tile.x_crop_end == 0 && tile.y_crop_end == 0 &&
+                        dst_tile_w_bytes == static_cast<size_t>(dst_stride)) {
+                        memcpy(dst_ptr, output_buffer, dst_tile_bytes);
+                    } else {
+                        vsh::bitblt(
+                            dst_ptr + (tile.y_crop_start * dst_stride + tile.x_crop_start * dst_bytes),
+                            dst_stride,
+                            output_buffer + (tile.y_crop_start * dst_tile_w_bytes + tile.x_crop_start * dst_bytes),
+                            dst_tile_w_bytes,
+                            dst_tile_w_bytes - (tile.x_crop_start + tile.x_crop_end) * dst_bytes,
+                            dst_tile_h - (tile.y_crop_start + tile.y_crop_end)
+                        );
+                    }
 
                     output_buffer += dst_tile_bytes;
                 }
