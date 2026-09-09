@@ -1,6 +1,7 @@
 #ifndef VSTRT_TRT_UTILS_H_
 #define VSTRT_TRT_UTILS_H_
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <iostream>
@@ -28,12 +29,19 @@ struct VideoSize {
 
 using TileSize = std::variant<RequestedTileSize, VideoSize>;
 
+constexpr size_t kNumBuffers = 3;
+
 struct InferenceInstance {
-    MemoryResource src;
-    MemoryResource dst;
+    std::array<MemoryResource, kNumBuffers> src;
+    std::array<MemoryResource, kNumBuffers> dst;
     StreamResource stream;
+    StreamResource h2d_stream;
+    StreamResource d2h_stream;
+    std::array<EventResource, kNumBuffers> h2d_done;
+    std::array<EventResource, kNumBuffers> compute_done;
+    std::array<EventResource, kNumBuffers> d2h_done;
     std::unique_ptr<nvinfer1::IExecutionContext> exec_context;
-    GraphExecResource graphexec;
+    std::array<GraphExecResource, kNumBuffers> graphexec;
     Resource<uint8_t *, cudaFree> d_context_allocation;
 };
 
@@ -119,7 +127,7 @@ std::optional<int> selectProfile(
 }
 
 static inline
-std::optional<ErrorMessage> enqueue(
+std::optional<ErrorMessage> enqueueCompute(
     const MemoryResource & src,
     const MemoryResource & dst,
     const std::unique_ptr<nvinfer1::IExecutionContext> & exec_context,
@@ -129,11 +137,6 @@ std::optional<ErrorMessage> enqueue(
     const auto set_error = [](const ErrorMessage & message) {
         return message;
     };
-
-    checkError(cudaMemcpyAsync(
-        src.d_data, src.h_data, src.size,
-        cudaMemcpyHostToDevice, stream
-    ));
 
     auto input_name = exec_context->getEngine().getIOTensorName(0);
     auto output_name = exec_context->getEngine().getIOTensorName(1);
@@ -147,11 +150,6 @@ std::optional<ErrorMessage> enqueue(
     if (!exec_context->enqueueV3(stream)) {
         return set_error("enqueue error");
     }
-
-    checkError(cudaMemcpyAsync(
-        dst.h_data, dst.d_data, dst.size,
-        cudaMemcpyDeviceToHost, stream
-    ));
 
     return {};
 }
@@ -167,21 +165,29 @@ std::variant<ErrorMessage, GraphExecResource> getGraphExec(
         return message;
     };
 
+    auto input_name = exec_context->getEngine().getIOTensorName(0);
+    auto output_name = exec_context->getEngine().getIOTensorName(1);
+
+    if (!exec_context->setTensorAddress(input_name, src.d_data.data)) {
+        return set_error("set input tensor address failed");
+    }
+    if (!exec_context->setTensorAddress(output_name, dst.d_data.data)) {
+        return set_error("set output tensor address failed");
+    }
+
     // flush deferred internal state update
     // https://docs.nvidia.com/deeplearning/tensorrt/archives/tensorrt-821/developer-guide/index.html#cuda-graphs
     {
-        auto result = enqueue(src, dst, exec_context, stream);
-        if (result.has_value()) {
-            return set_error(result.value());
+        if (!exec_context->enqueueV3(stream)) {
+            return set_error("warmup enqueue failed");
         }
         checkError(cudaStreamSynchronize(stream));
     }
 
     checkError(cudaStreamBeginCapture(stream, cudaStreamCaptureModeRelaxed));
     {
-        auto result = enqueue(src, dst, exec_context, stream);
-        if (result.has_value()) {
-            return set_error(result.value());
+        if (!exec_context->enqueueV3(stream)) {
+            return set_error("capture enqueue error");
         }
     }
     cudaGraph_t graph;
@@ -247,6 +253,21 @@ std::variant<ErrorMessage, InferenceInstance> getInstance(
     StreamResource stream {};
     checkError(cudaStreamCreateWithFlags(&stream.data, cudaStreamNonBlocking));
 
+    StreamResource h2d_stream {};
+    checkError(cudaStreamCreateWithFlags(&h2d_stream.data, cudaStreamNonBlocking));
+
+    StreamResource d2h_stream {};
+    checkError(cudaStreamCreateWithFlags(&d2h_stream.data, cudaStreamNonBlocking));
+
+    std::array<EventResource, kNumBuffers> h2d_done {};
+    std::array<EventResource, kNumBuffers> compute_done {};
+    std::array<EventResource, kNumBuffers> d2h_done {};
+    for (size_t b = 0; b < kNumBuffers; ++b) {
+        checkError(cudaEventCreateWithFlags(&h2d_done[b].data, cudaEventDisableTiming));
+        checkError(cudaEventCreateWithFlags(&compute_done[b].data, cudaEventDisableTiming));
+        checkError(cudaEventCreateWithFlags(&d2h_done[b].data, cudaEventDisableTiming));
+    }
+
     auto exec_context = std::unique_ptr<nvinfer1::IExecutionContext>(
         engine->createExecutionContext(
             is_dynamic ?
@@ -295,44 +316,48 @@ std::variant<ErrorMessage, InferenceInstance> getInstance(
         }
     }
 
-    MemoryResource src {};
+    std::array<MemoryResource, kNumBuffers> src {};
     {
         auto dim = exec_context->getTensorShape(input_name);
         auto type = engine->getTensorDataType(input_name);
 
         auto size = getSize(dim) * getBytesPerSample(type);
 
-        Resource<uint8_t *, cudaFree> d_data {};
-        checkError(cudaMalloc(&d_data.data, size));
+        for (size_t b = 0; b < kNumBuffers; ++b) {
+            Resource<uint8_t *, cudaFree> d_data {};
+            checkError(cudaMalloc(&d_data.data, size));
 
-        Resource<uint8_t *, cudaFreeHost> h_data {};
-        checkError(cudaMallocHost(&h_data.data, size, cudaHostAllocWriteCombined));
+            Resource<uint8_t *, cudaFreeHost> h_data {};
+            checkError(cudaMallocHost(&h_data.data, size, cudaHostAllocWriteCombined));
 
-        src = MemoryResource{
-            .h_data = std::move(h_data),
-            .d_data = std::move(d_data),
-            .size=size
-        };
+            src[b] = MemoryResource{
+                .h_data = std::move(h_data),
+                .d_data = std::move(d_data),
+                .size=size
+            };
+        }
     }
 
-    MemoryResource dst {};
+    std::array<MemoryResource, kNumBuffers> dst {};
     {
         auto dim = exec_context->getTensorShape(output_name);
         auto type = engine->getTensorDataType(output_name);
 
         auto size = getSize(dim) * getBytesPerSample(type);
 
-        Resource<uint8_t *, cudaFree> d_data {};
-        checkError(cudaMalloc(&d_data.data, size));
+        for (size_t b = 0; b < kNumBuffers; ++b) {
+            Resource<uint8_t *, cudaFree> d_data {};
+            checkError(cudaMalloc(&d_data.data, size));
 
-        Resource<uint8_t *, cudaFreeHost> h_data {};
-        checkError(cudaMallocHost(&h_data.data, size));
+            Resource<uint8_t *, cudaFreeHost> h_data {};
+            checkError(cudaMallocHost(&h_data.data, size));
 
-        dst = MemoryResource{
-            .h_data = std::move(h_data),
-            .d_data = std::move(d_data),
-            .size=size
-        };
+            dst[b] = MemoryResource{
+                .h_data = std::move(h_data),
+                .d_data = std::move(d_data),
+                .size=size
+            };
+        }
     }
 
     Resource<uint8_t *, cudaFree> d_context_allocation {};
@@ -347,16 +372,18 @@ std::variant<ErrorMessage, InferenceInstance> getInstance(
         exec_context->setDeviceMemoryV2(d_context_allocation.data, static_cast<int64_t>(buffer_size));
     }
 
-    GraphExecResource graphexec {};
+    std::array<GraphExecResource, kNumBuffers> graphexec {};
     if (use_cuda_graph) {
-        auto result = getGraphExec(
-            src, dst,
-            exec_context, stream
-        );
-        if (std::holds_alternative<GraphExecResource>(result)) {
-            graphexec = std::move(std::get<GraphExecResource>(result));
-        } else {
-            return set_error(std::get<ErrorMessage>(result));
+        for (size_t b = 0; b < kNumBuffers; ++b) {
+            auto result = getGraphExec(
+                src[b], dst[b],
+                exec_context, stream
+            );
+            if (std::holds_alternative<GraphExecResource>(result)) {
+                graphexec[b] = std::move(std::get<GraphExecResource>(result));
+            } else {
+                return set_error(std::get<ErrorMessage>(result));
+            }
         }
     }
 
@@ -364,6 +391,11 @@ std::variant<ErrorMessage, InferenceInstance> getInstance(
         .src = std::move(src),
         .dst = std::move(dst),
         .stream = std::move(stream),
+        .h2d_stream = std::move(h2d_stream),
+        .d2h_stream = std::move(d2h_stream),
+        .h2d_done = std::move(h2d_done),
+        .compute_done = std::move(compute_done),
+        .d2h_done = std::move(d2h_done),
         .exec_context = std::move(exec_context),
         .graphexec = std::move(graphexec),
         .d_context_allocation = std::move(d_context_allocation)

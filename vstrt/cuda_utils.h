@@ -68,6 +68,7 @@ struct MemoryResource {
 };
 
 using StreamResource = Resource<cudaStream_t, cudaStreamDestroy>;
+using EventResource = Resource<cudaEvent_t, cudaEventDestroy>;
 using GraphExecResource = Resource<cudaGraphExec_t, cudaGraphExecDestroy>;
 
 #endif // VSTRT_CUDA_UTILS_H_
