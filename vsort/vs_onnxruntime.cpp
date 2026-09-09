@@ -16,10 +16,9 @@
 using namespace std::chrono_literals;
 #endif
 
-#include <VapourSynth4.h>
-#include <VSHelper4.h>
 #include <VSConstants4.h>
-
+#include <VSHelper4.h>
+#include <VapourSynth4.h>
 #include <onnx/common/version.h>
 #include <onnx/onnx_pb.h>
 
@@ -50,39 +49,39 @@ using namespace std::chrono_literals;
 #define PLUGIN_VERSION_STRING "unknown"
 #endif
 
-
 #ifdef ENABLE_COREML
-extern "C" OrtStatusPtr OrtSessionOptionsAppendExecutionProvider_CoreML(OrtSessionOptions *so, int flags);
+extern "C" OrtStatusPtr OrtSessionOptionsAppendExecutionProvider_CoreML(OrtSessionOptions* so, int flags);
 #endif // ENABLE_COREML
 
-#define checkError(expr) do {                                                  \
-    OrtStatusPtr __err = expr;                                                 \
-    if (__err) {                                                               \
-        const std::string message = ortapi->GetErrorMessage(__err);            \
-        ortapi->ReleaseStatus(__err);                                          \
-        return set_error("'"s + # expr + "' failed: " + message);              \
-    }                                                                          \
-} while(0)
+#define checkError(expr)                                                                                               \
+    do {                                                                                                               \
+        OrtStatusPtr __err = expr;                                                                                     \
+        if (__err) {                                                                                                   \
+            const std::string message = ortapi->GetErrorMessage(__err);                                                \
+            ortapi->ReleaseStatus(__err);                                                                              \
+            return set_error("'"s + #expr + "' failed: " + message);                                                   \
+        }                                                                                                              \
+    } while (0)
 
 #ifdef ENABLE_CUDA
-#define checkCUDAError(expr) do {                                              \
-    if (cudaError_t result = expr; result != cudaSuccess) {                    \
-        const char * error_str = cudaGetErrorString(result);                   \
-        return set_error("'"s + # expr + "' failed: " + error_str);            \
-    }                                                                          \
-} while(0)
+#define checkCUDAError(expr)                                                                                           \
+    do {                                                                                                               \
+        if (cudaError_t result = expr; result != cudaSuccess) {                                                        \
+            const char* error_str = cudaGetErrorString(result);                                                        \
+            return set_error("'"s + #expr + "' failed: " + error_str);                                                 \
+        }                                                                                                              \
+    } while (0)
 #endif // ENABLE_CUDA
 
 using namespace std::string_literals;
 
 #define PLUGIN_ID "io.github.amusementclub.vs_onnxruntime"
-static const OrtApi * ortapi = nullptr;
+static const OrtApi* ortapi = nullptr;
 static std::atomic<int64_t> logger_id = 0;
 
 #if defined(ENABLE_CUDA) || defined(ENABLE_DML)
 static std::mutex capture_lock;
 #endif
-
 
 [[nodiscard]]
 static std::optional<std::string> ortInit() noexcept {
@@ -101,15 +100,11 @@ static std::optional<std::string> ortInit() noexcept {
     }
 }
 
-
 [[nodiscard]]
-static std::variant<std::string, std::array<int64_t, 4>> getShape(
-    const OrtTensorTypeAndShapeInfo* tensor_info
-) noexcept {
+static std::variant<std::string, std::array<int64_t, 4>>
+getShape(const OrtTensorTypeAndShapeInfo* tensor_info) noexcept {
 
-    const auto set_error = [](const std::string & error_message) {
-        return error_message;
-    };
+    const auto set_error = [](const std::string& error_message) { return error_message; };
 
     std::array<int64_t, 4> shape;
     checkError(ortapi->GetDimensions(tensor_info, std::data(shape), std::size(shape)));
@@ -117,18 +112,12 @@ static std::variant<std::string, std::array<int64_t, 4>> getShape(
     return shape;
 }
 
-
 [[nodiscard]]
-static std::variant<std::string, std::array<int64_t, 4>> getShape(
-    const OrtSession * session,
-    bool input
-) noexcept {
+static std::variant<std::string, std::array<int64_t, 4>> getShape(const OrtSession* session, bool input) noexcept {
 
-    const auto set_error = [](const std::string & error_message) {
-        return error_message;
-    };
+    const auto set_error = [](const std::string& error_message) { return error_message; };
 
-    OrtTypeInfo * typeinfo;
+    OrtTypeInfo* typeinfo;
     if (input) {
         checkError(ortapi->SessionGetInputTypeInfo(session, 0, &typeinfo));
     } else {
@@ -152,40 +141,34 @@ static size_t getNumBytes(int32_t type) {
     using namespace ONNX_NAMESPACE;
 
     switch (type) {
-        case TensorProto::FLOAT:
-            return 4;
-        case TensorProto::FLOAT16:
-            return 2;
-        default:
-            return 0;
+    case TensorProto::FLOAT:
+        return 4;
+    case TensorProto::FLOAT16:
+        return 2;
+    default:
+        return 0;
     }
 }
 
-
-static int numPlanes(
-    const std::vector<const VSVideoInfo *> & vis
-) noexcept {
+static int numPlanes(const std::vector<const VSVideoInfo*>& vis) noexcept {
 
     int num_planes = 0;
 
-    for (const auto & vi : vis) {
+    for (const auto& vi : vis) {
         num_planes += vi->format.numPlanes;
     }
 
     return num_planes;
 }
 
-
 [[nodiscard]]
-static std::optional<std::string> checkNodes(
-    const std::vector<const VSVideoInfo *> & vis
-) noexcept {
+static std::optional<std::string> checkNodes(const std::vector<const VSVideoInfo*>& vis) noexcept {
 
-    for (const auto & vi : vis) {
+    for (const auto& vi : vis) {
         if (vi->format.sampleType != stFloat) {
             return "expects clip with floating-point type";
         }
-        
+
         if (vi->format.bitsPerSample != 32 && vi->format.bitsPerSample != 16) {
             return "expects clip with type fp32 or fp16";
         }
@@ -206,19 +189,12 @@ static std::optional<std::string> checkNodes(
     return {};
 }
 
-
 [[nodiscard]]
-static std::optional<std::string> checkIOInfo(
-    const OrtTypeInfo * info,
-    bool is_output,
-    bool flexible_output
-) noexcept {
+static std::optional<std::string> checkIOInfo(const OrtTypeInfo* info, bool is_output, bool flexible_output) noexcept {
 
-    const auto set_error = [](const std::string & error_message) {
-        return error_message;
-    };
+    const auto set_error = [](const std::string& error_message) { return error_message; };
 
-    const OrtTensorTypeAndShapeInfo * tensor_info;
+    const OrtTensorTypeAndShapeInfo* tensor_info;
     checkError(ortapi->CastTypeInfoToTensorInfo(info, &tensor_info));
 
     ONNXTensorElementDataType element_type;
@@ -254,16 +230,10 @@ static std::optional<std::string> checkIOInfo(
     return {};
 }
 
-
 [[nodiscard]]
-static std::optional<std::string> checkSession(
-    const OrtSession * session,
-    bool flexible_output
-) noexcept {
+static std::optional<std::string> checkSession(const OrtSession* session, bool flexible_output) noexcept {
 
-    const auto set_error = [](const std::string & error_message) {
-        return error_message;
-    };
+    const auto set_error = [](const std::string& error_message) { return error_message; };
 
     size_t num_inputs;
     checkError(ortapi->SessionGetInputCount(session, &num_inputs));
@@ -272,7 +242,7 @@ static std::optional<std::string> checkSession(
         return set_error("network input count must be 1, got " + std::to_string(num_inputs));
     }
 
-    OrtTypeInfo * input_type_info;
+    OrtTypeInfo* input_type_info;
     checkError(ortapi->SessionGetInputTypeInfo(session, 0, &input_type_info));
 
     if (auto err = checkIOInfo(input_type_info, false, flexible_output); err.has_value()) {
@@ -288,7 +258,7 @@ static std::optional<std::string> checkSession(
         return "network output count must be 1, got " + std::to_string(num_outputs);
     }
 
-    OrtTypeInfo * output_type_info;
+    OrtTypeInfo* output_type_info;
     checkError(ortapi->SessionGetOutputTypeInfo(session, 0, &output_type_info));
 
     if (auto err = checkIOInfo(output_type_info, true, flexible_output); err.has_value()) {
@@ -301,19 +271,15 @@ static std::optional<std::string> checkSession(
 }
 
 [[nodiscard]]
-static std::optional<std::string> checkNodesAndNetwork(
-    const OrtSession * session,
-    const std::vector<const VSVideoInfo *> & vis
-) noexcept {
+static std::optional<std::string>
+checkNodesAndNetwork(const OrtSession* session, const std::vector<const VSVideoInfo*>& vis) noexcept {
 
-    const auto set_error = [](const std::string & error_message) {
-        return error_message;
-    };
+    const auto set_error = [](const std::string& error_message) { return error_message; };
 
-    OrtTypeInfo * input_type_info;
+    OrtTypeInfo* input_type_info;
     checkError(ortapi->SessionGetInputTypeInfo(session, 0, &input_type_info));
 
-    const OrtTensorTypeAndShapeInfo * input_tensor_info;
+    const OrtTensorTypeAndShapeInfo* input_tensor_info;
     checkError(ortapi->CastTypeInfoToTensorInfo(input_type_info, &input_tensor_info));
 
     auto network_in_dims = std::get<std::array<int64_t, 4>>(getShape(input_tensor_info));
@@ -332,10 +298,10 @@ static std::optional<std::string> checkNodesAndNetwork(
         return set_error("tile size larger than clip dimension");
     }
 
-    OrtTypeInfo * output_type_info;
+    OrtTypeInfo* output_type_info;
     checkError(ortapi->SessionGetOutputTypeInfo(session, 0, &output_type_info));
 
-    const OrtTensorTypeAndShapeInfo * output_tensor_info;
+    const OrtTensorTypeAndShapeInfo* output_tensor_info;
     checkError(ortapi->CastTypeInfoToTensorInfo(output_type_info, &output_tensor_info));
 
     auto network_out_dims = std::get<std::array<int64_t, 4>>(getShape(output_tensor_info));
@@ -355,11 +321,11 @@ static std::optional<std::string> checkNodesAndNetwork(
 }
 
 static void setDimensions(
-    std::unique_ptr<VSVideoInfo> & vi,
-    const std::array<int64_t, 4> & input_shape,
-    const std::array<int64_t, 4> & output_shape,
-    VSCore * core,
-    const VSAPI * vsapi,
+    std::unique_ptr<VSVideoInfo>& vi,
+    const std::array<int64_t, 4>& input_shape,
+    const std::array<int64_t, 4>& output_shape,
+    VSCore* core,
+    const VSAPI* vsapi,
     int32_t onnx_output_type,
     bool flexible_output
 ) noexcept {
@@ -375,19 +341,19 @@ static void setDimensions(
 }
 
 struct TicketSemaphore {
-    std::atomic<intptr_t> ticket {};
-    std::atomic<intptr_t> current {};
+    std::atomic<intptr_t> ticket{};
+    std::atomic<intptr_t> current{};
 
     void acquire() noexcept {
-        intptr_t tk { ticket.fetch_add(1, std::memory_order_acquire) };
+        intptr_t tk{ticket.fetch_add(1, std::memory_order_acquire)};
         while (true) {
-            intptr_t curr { current.load(std::memory_order_acquire) };
+            intptr_t curr{current.load(std::memory_order_acquire)};
             if (tk <= curr) {
                 return;
             }
 #if __cpp_lib_atomic_wait
             current.wait(curr, std::memory_order::relaxed);
-#else // __cpp_lib_atomic_wait
+#else  // __cpp_lib_atomic_wait
             std::this_thread::sleep_for(10ms);
 #endif // __cpp_lib_atomic_wait
         }
@@ -401,77 +367,72 @@ struct TicketSemaphore {
     }
 };
 
-enum class Backend {
-    CPU = 0,
-    CUDA = 1,
-    COREML = 2,
-    DML = 3
-};
+enum class Backend { CPU = 0, CUDA = 1, COREML = 2, DML = 3 };
 
 #ifdef ENABLE_CUDA
 struct CudaBuffer {
-    uint8_t * h_input {};
-    uint8_t * d_input {};
-    size_t input_size {};
+    uint8_t* h_input{};
+    uint8_t* d_input{};
+    size_t input_size{};
 
-    uint8_t * h_output {};
-    uint8_t * d_output {};
-    size_t output_size {};
+    uint8_t* h_output{};
+    uint8_t* d_output{};
+    size_t output_size{};
 
-    OrtValue * input_tensor {};
-    OrtValue * output_tensor {};
-    OrtIoBinding * binding {};
-    OrtRunOptions * run_options {};
+    OrtValue* input_tensor{};
+    OrtValue* output_tensor{};
+    OrtIoBinding* binding{};
+    OrtRunOptions* run_options{};
 };
 #endif // ENABLE_CUDA
 
 // per-stream context
 struct Resource {
-    OrtSession * session {};
+    OrtSession* session{};
 
     // For CPU / DML (single buffer)
-    OrtValue * input_tensor {};
-    OrtValue * output_tensor {};
-    OrtIoBinding * binding {};
-    char * input_name {};
-    char * output_name {};
-    OrtRunOptions * run_options {};
+    OrtValue* input_tensor{};
+    OrtValue* output_tensor{};
+    OrtIoBinding* binding{};
+    char* input_name{};
+    char* output_name{};
+    OrtRunOptions* run_options{};
 
 #ifdef ENABLE_CUDA
     static constexpr size_t kNumBuffers = 3;
-    cudaStream_t stream {};
-    cudaStream_t h2d_stream {};
-    cudaStream_t d2h_stream {};
-    std::array<cudaEvent_t, kNumBuffers> h2d_done {};
-    std::array<cudaEvent_t, kNumBuffers> compute_done {};
-    std::array<cudaEvent_t, kNumBuffers> d2h_done {};
-    std::array<CudaBuffer, kNumBuffers> cuda_buffers {};
+    cudaStream_t stream{};
+    cudaStream_t h2d_stream{};
+    cudaStream_t d2h_stream{};
+    std::array<cudaEvent_t, kNumBuffers> h2d_done{};
+    std::array<cudaEvent_t, kNumBuffers> compute_done{};
+    std::array<cudaEvent_t, kNumBuffers> d2h_done{};
+    std::array<CudaBuffer, kNumBuffers> cuda_buffers{};
 #endif // ENABLE_CUDA
 
 #if defined(ENABLE_CUDA) || defined(ENABLE_DML)
-    bool require_replay {};
+    bool require_replay{};
 #endif
 };
 
 struct vsOrtData {
-    std::vector<VSNode *> nodes;
+    std::vector<VSNode*> nodes;
     std::unique_ptr<VSVideoInfo> out_vi;
 
 #ifdef ENABLE_COREML
     bool ml_program;
-#endif //ENABLE_COREML
+#endif // ENABLE_COREML
 
     int overlap_w, overlap_h;
 
-    OrtEnv * environment;
+    OrtEnv* environment;
     Backend backend;
 
     int device_id;
-    bool use_cuda_graph {};
+    bool use_cuda_graph{};
     std::mutex cuda_graph_mutex;
 
     std::vector<TileDesc> static_tiles;
-    bool has_static_tiles { false };
+    bool has_static_tiles{false};
 
     std::vector<Resource> resources;
     std::vector<int> tickets;
@@ -499,33 +460,32 @@ struct vsOrtData {
     }
 };
 
-
-static const VSFrame *VS_CC vsOrtGetFrame(
+static const VSFrame* VS_CC vsOrtGetFrame(
     int n,
     int activationReason,
-    void *instanceData,
-    void **frameData,
-    VSFrameContext *frameCtx,
-    VSCore *core,
-    const VSAPI *vsapi
+    void* instanceData,
+    void** frameData,
+    VSFrameContext* frameCtx,
+    VSCore* core,
+    const VSAPI* vsapi
 ) noexcept {
 
-    auto d = static_cast<vsOrtData *>(instanceData);
+    auto d = static_cast<vsOrtData*>(instanceData);
 
     if (activationReason == arInitial) {
-        for (const auto & node : d->nodes) {
+        for (const auto& node : d->nodes) {
             vsapi->requestFrameFilter(n, node, frameCtx);
         }
     } else if (activationReason == arAllFramesReady) {
-        std::vector<const VSVideoInfo *> in_vis;
+        std::vector<const VSVideoInfo*> in_vis;
         in_vis.reserve(std::size(d->nodes));
-        for (const auto & node : d->nodes) {
+        for (const auto& node : d->nodes) {
             in_vis.emplace_back(vsapi->getVideoInfo(node));
         }
 
-        std::vector<const VSFrame *> src_frames;
+        std::vector<const VSFrame*> src_frames;
         src_frames.reserve(std::size(d->nodes));
-        for (const auto & node : d->nodes) {
+        for (const auto& node : d->nodes) {
             src_frames.emplace_back(vsapi->getFrameFilter(n, node, frameCtx));
         }
 
@@ -534,18 +494,16 @@ static const VSFrame *VS_CC vsOrtGetFrame(
         auto src_height = vsapi->getFrameHeight(src_frames.front(), 0);
         auto src_bytes = vsapi->getVideoFrameFormat(src_frames.front())->bytesPerSample;
 
-        VSFrame * const dst_frame = vsapi->newVideoFrame(
-            &d->out_vi->format, d->out_vi->width, d->out_vi->height,
-            src_frames.front(), core
-        );
+        VSFrame* const dst_frame =
+            vsapi->newVideoFrame(&d->out_vi->format, d->out_vi->width, d->out_vi->height, src_frames.front(), core);
 
-        std::vector<VSFrame *> dst_frames;
+        std::vector<VSFrame*> dst_frames;
 
         auto dst_stride = vsapi->getStride(dst_frame, 0);
         auto dst_bytes = vsapi->getVideoFrameFormat(dst_frame)->bytesPerSample;
 
         auto ticket = d->acquire();
-        Resource & resource = d->resources[ticket];
+        Resource& resource = d->resources[ticket];
 
         auto src_tile_shape = std::get<std::array<int64_t, 4>>(getShape(resource.session, true));
         auto src_tile_h = src_tile_shape[2];
@@ -553,7 +511,7 @@ static const VSFrame *VS_CC vsOrtGetFrame(
         auto src_tile_w_bytes = src_tile_w * src_bytes;
         auto src_tile_bytes = src_tile_h * src_tile_w_bytes;
 
-        std::vector<const uint8_t *> src_ptrs;
+        std::vector<const uint8_t*> src_ptrs;
         src_ptrs.reserve(src_tile_shape[1]);
         for (unsigned i = 0; i < std::size(d->nodes); ++i) {
             for (int j = 0; j < in_vis[i]->format.numPlanes; ++j) {
@@ -571,17 +529,16 @@ static const VSFrame *VS_CC vsOrtGetFrame(
         auto dst_tile_bytes = dst_tile_h * dst_tile_w_bytes;
         auto dst_planes = dst_tile_shape[1];
 
-        std::vector<uint8_t *> dst_ptrs;
+        std::vector<uint8_t*> dst_ptrs;
         if (d->flexible_output_prop.empty()) {
             for (int i = 0; i < dst_planes; ++i) {
                 dst_ptrs.emplace_back(vsapi->getWritePtr(dst_frame, i));
             }
         } else {
             for (int i = 0; i < dst_planes; ++i) {
-                auto frame { vsapi->newVideoFrame(
-                    &d->out_vi->format, d->out_vi->width, d->out_vi->height,
-                    src_frames[0], core
-                )};
+                auto frame{
+                    vsapi->newVideoFrame(&d->out_vi->format, d->out_vi->width, d->out_vi->height, src_frames[0], core)
+                };
                 dst_frames.emplace_back(frame);
                 dst_ptrs.emplace_back(vsapi->getWritePtr(frame, 0));
             }
@@ -590,21 +547,18 @@ static const VSFrame *VS_CC vsOrtGetFrame(
         auto h_scale = dst_tile_h / src_tile_h;
         auto w_scale = dst_tile_w / src_tile_w;
 
-        const auto set_error = [&](const std::string & error_message) {
-            vsapi->setFilterError(
-                (__func__ + ": "s + error_message).c_str(),
-                frameCtx
-            );
+        const auto set_error = [&](const std::string& error_message) {
+            vsapi->setFilterError((__func__ + ": "s + error_message).c_str(), frameCtx);
 
             d->release(ticket);
 
-            for (const auto & frame : dst_frames) {
+            for (const auto& frame : dst_frames) {
                 vsapi->freeFrame(frame);
             }
 
             vsapi->freeFrame(dst_frame);
 
-            for (const auto & frame : src_frames) {
+            for (const auto& frame : src_frames) {
                 vsapi->freeFrame(frame);
             }
 
@@ -615,37 +569,32 @@ static const VSFrame *VS_CC vsOrtGetFrame(
         if (!d->has_static_tiles) {
             local_tiles = generateTiles(src_width, src_height, src_tile_w, src_tile_h, d->overlap_w, d->overlap_h);
         }
-        const auto & tiles = d->has_static_tiles ? d->static_tiles : local_tiles;
+        const auto& tiles = d->has_static_tiles ? d->static_tiles : local_tiles;
 
 #ifdef ENABLE_CUDA
         if (d->backend == Backend::CUDA) {
             checkCUDAError(cudaSetDevice(d->device_id));
 
             auto pack_tile = [&](size_t tile_idx, size_t b) {
-                const auto & tile = tiles[tile_idx];
-                uint8_t * h_input = resource.cuda_buffers[b].h_input;
-                for (const auto & _src_ptr : src_ptrs) {
-                    const uint8_t * src_ptr = _src_ptr + tile.y * src_stride + tile.x * src_bytes;
+                const auto& tile = tiles[tile_idx];
+                uint8_t* h_input = resource.cuda_buffers[b].h_input;
+                for (const auto& _src_ptr : src_ptrs) {
+                    const uint8_t* src_ptr = _src_ptr + tile.y * src_stride + tile.x * src_bytes;
                     if (src_tile_w_bytes == static_cast<size_t>(src_stride)) {
                         memcpy(h_input, src_ptr, src_tile_bytes);
                     } else {
-                        vsh::bitblt(
-                            h_input, src_tile_w_bytes,
-                            src_ptr, src_stride,
-                            src_tile_w_bytes, src_tile_h
-                        );
+                        vsh::bitblt(h_input, src_tile_w_bytes, src_ptr, src_stride, src_tile_w_bytes, src_tile_h);
                     }
                     h_input += src_tile_bytes;
                 }
             };
 
             auto launch_tile = [&](size_t b) -> std::optional<std::string> {
-                auto & buf = resource.cuda_buffers[b];
+                auto& buf = resource.cuda_buffers[b];
 
                 // 1. Host-to-Device transfer on h2d_stream
                 checkCUDAError(cudaMemcpyAsync(
-                    buf.d_input, buf.h_input, buf.input_size,
-                    cudaMemcpyHostToDevice, resource.h2d_stream
+                    buf.d_input, buf.h_input, buf.input_size, cudaMemcpyHostToDevice, resource.h2d_stream
                 ));
                 checkCUDAError(cudaEventRecord(resource.h2d_done[b], resource.h2d_stream));
 
@@ -655,17 +604,9 @@ static const VSFrame *VS_CC vsOrtGetFrame(
                 // 3. Launch ORT inference on compute stream (resource.stream)
                 if (d->use_cuda_graph) {
                     std::lock_guard<std::mutex> lock(d->cuda_graph_mutex);
-                    checkError(ortapi->RunWithBinding(
-                        resource.session,
-                        buf.run_options,
-                        buf.binding
-                    ));
+                    checkError(ortapi->RunWithBinding(resource.session, buf.run_options, buf.binding));
                 } else {
-                    checkError(ortapi->RunWithBinding(
-                        resource.session,
-                        buf.run_options,
-                        buf.binding
-                    ));
+                    checkError(ortapi->RunWithBinding(resource.session, buf.run_options, buf.binding));
                 }
                 checkCUDAError(cudaEventRecord(resource.compute_done[b], resource.stream));
 
@@ -674,8 +615,7 @@ static const VSFrame *VS_CC vsOrtGetFrame(
 
                 // 5. Device-to-Host transfer on d2h_stream
                 checkCUDAError(cudaMemcpyAsync(
-                    buf.h_output, buf.d_output, buf.output_size,
-                    cudaMemcpyDeviceToHost, resource.d2h_stream
+                    buf.h_output, buf.d_output, buf.output_size, cudaMemcpyDeviceToHost, resource.d2h_stream
                 ));
                 checkCUDAError(cudaEventRecord(resource.d2h_done[b], resource.d2h_stream));
 
@@ -683,17 +623,15 @@ static const VSFrame *VS_CC vsOrtGetFrame(
             };
 
             auto unpack_tile = [&](size_t tile_idx, size_t b) -> std::optional<std::string> {
-                const auto & tile = tiles[tile_idx];
+                const auto& tile = tiles[tile_idx];
                 checkCUDAError(cudaEventSynchronize(resource.d2h_done[b]));
 
-                uint8_t * h_output = resource.cuda_buffers[b].h_output;
+                uint8_t* h_output = resource.cuda_buffers[b].h_output;
                 for (int plane = 0; plane < dst_planes; ++plane) {
-                    uint8_t * dst_ptr = dst_ptrs[plane] +
-                        h_scale * tile.y * dst_stride + w_scale * tile.x * dst_bytes;
+                    uint8_t* dst_ptr = dst_ptrs[plane] + h_scale * tile.y * dst_stride + w_scale * tile.x * dst_bytes;
 
-                    if (tile.x_crop_start == 0 && tile.y_crop_start == 0 &&
-                        tile.x_crop_end == 0 && tile.y_crop_end == 0 &&
-                        dst_tile_w_bytes == static_cast<size_t>(dst_stride)) {
+                    if (tile.x_crop_start == 0 && tile.y_crop_start == 0 && tile.x_crop_end == 0 &&
+                        tile.y_crop_end == 0 && dst_tile_w_bytes == static_cast<size_t>(dst_stride)) {
                         memcpy(dst_ptr, h_output, dst_tile_bytes);
                     } else {
                         vsh::bitblt(
@@ -739,43 +677,35 @@ static const VSFrame *VS_CC vsOrtGetFrame(
 #endif // ENABLE_CUDA
         {
             for (size_t i = 0; i < tiles.size(); ++i) {
-                const auto & tile = tiles[i];
+                const auto& tile = tiles[i];
 
-                uint8_t * input_buffer;
-                checkError(ortapi->GetTensorMutableData(
-                    resource.input_tensor,
-                    reinterpret_cast<void **>(&input_buffer)
-                ));
+                uint8_t* input_buffer;
+                checkError(
+                    ortapi->GetTensorMutableData(resource.input_tensor, reinterpret_cast<void**>(&input_buffer))
+                );
 
-                for (const auto & _src_ptr : src_ptrs) {
-                    const uint8_t * src_ptr = _src_ptr + tile.y * src_stride + tile.x * src_bytes;
+                for (const auto& _src_ptr : src_ptrs) {
+                    const uint8_t* src_ptr = _src_ptr + tile.y * src_stride + tile.x * src_bytes;
                     if (src_tile_w_bytes == static_cast<size_t>(src_stride)) {
                         memcpy(input_buffer, src_ptr, src_tile_bytes);
                     } else {
-                        vsh::bitblt(
-                            input_buffer, src_tile_w_bytes,
-                            src_ptr, src_stride,
-                            src_tile_w_bytes, src_tile_h
-                        );
+                        vsh::bitblt(input_buffer, src_tile_w_bytes, src_ptr, src_stride, src_tile_w_bytes, src_tile_h);
                     }
                     input_buffer += src_tile_bytes;
                 }
 
                 checkError(ortapi->RunWithBinding(resource.session, resource.run_options, resource.binding));
 
-                uint8_t * output_buffer;
-                checkError(ortapi->GetTensorMutableData(
-                    resource.output_tensor,
-                    reinterpret_cast<void **>(&output_buffer)
-                ));
+                uint8_t* output_buffer;
+                checkError(
+                    ortapi->GetTensorMutableData(resource.output_tensor, reinterpret_cast<void**>(&output_buffer))
+                );
 
                 for (int plane = 0; plane < dst_planes; ++plane) {
-                    uint8_t * dst_ptr = dst_ptrs[plane] +
-                        h_scale * tile.y * dst_stride + w_scale * tile.x * dst_bytes;
+                    uint8_t* dst_ptr = dst_ptrs[plane] + h_scale * tile.y * dst_stride + w_scale * tile.x * dst_bytes;
 
-                    if (tile.x_crop_start == 0 && tile.y_crop_start == 0 &&
-                        tile.x_crop_end == 0 && tile.y_crop_end == 0 &&
-                        dst_tile_w_bytes == static_cast<size_t>(dst_stride)) {
+                    if (tile.x_crop_start == 0 && tile.y_crop_start == 0 && tile.x_crop_end == 0 &&
+                        tile.y_crop_end == 0 && dst_tile_w_bytes == static_cast<size_t>(dst_stride)) {
                         memcpy(dst_ptr, output_buffer, dst_tile_bytes);
                     } else {
                         vsh::bitblt(
@@ -795,7 +725,7 @@ static const VSFrame *VS_CC vsOrtGetFrame(
 
         d->release(ticket);
 
-        for (const auto & frame : src_frames) {
+        for (const auto& frame : src_frames) {
             vsapi->freeFrame(frame);
         }
 
@@ -803,7 +733,7 @@ static const VSFrame *VS_CC vsOrtGetFrame(
             auto prop = vsapi->getFramePropertiesRW(dst_frame);
 
             for (int i = 0; i < dst_planes; i++) {
-                auto key { d->flexible_output_prop + std::to_string(i) };
+                auto key{d->flexible_output_prop + std::to_string(i)};
                 vsapi->mapSetFrame(prop, key.c_str(), dst_frames[i], maReplace);
                 vsapi->freeFrame(dst_frames[i]);
             }
@@ -815,58 +745,74 @@ static const VSFrame *VS_CC vsOrtGetFrame(
     return nullptr;
 }
 
+static void VS_CC vsOrtFree(void* instanceData, VSCore* core, const VSAPI* vsapi) noexcept {
 
-static void VS_CC vsOrtFree(
-    void *instanceData,
-    VSCore *core,
-    const VSAPI *vsapi
-) noexcept {
+    auto d = static_cast<vsOrtData*>(instanceData);
 
-    auto d = static_cast<vsOrtData *>(instanceData);
-
-    for (const auto & node : d->nodes) {
+    for (const auto& node : d->nodes) {
         vsapi->freeNode(node);
     }
 
-    OrtAllocator * cpu_allocator = nullptr;
+    OrtAllocator* cpu_allocator = nullptr;
     ortapi->GetAllocatorWithDefaultOptions(&cpu_allocator);
 
-    for (auto & resource : d->resources) {
+    for (auto& resource : d->resources) {
 #ifdef ENABLE_CUDA
         if (d->backend == Backend::CUDA) {
             for (size_t b = 0; b < Resource::kNumBuffers; ++b) {
-                auto & buf = resource.cuda_buffers[b];
-                if (buf.run_options) ortapi->ReleaseRunOptions(buf.run_options);
-                if (buf.binding) ortapi->ReleaseIoBinding(buf.binding);
-                if (buf.output_tensor) ortapi->ReleaseValue(buf.output_tensor);
-                if (buf.input_tensor) ortapi->ReleaseValue(buf.input_tensor);
-                if (buf.h_input) cudaFreeHost(buf.h_input);
-                if (buf.d_input) cudaFree(buf.d_input);
-                if (buf.h_output) cudaFreeHost(buf.h_output);
-                if (buf.d_output) cudaFree(buf.d_output);
+                auto& buf = resource.cuda_buffers[b];
+                if (buf.run_options)
+                    ortapi->ReleaseRunOptions(buf.run_options);
+                if (buf.binding)
+                    ortapi->ReleaseIoBinding(buf.binding);
+                if (buf.output_tensor)
+                    ortapi->ReleaseValue(buf.output_tensor);
+                if (buf.input_tensor)
+                    ortapi->ReleaseValue(buf.input_tensor);
+                if (buf.h_input)
+                    cudaFreeHost(buf.h_input);
+                if (buf.d_input)
+                    cudaFree(buf.d_input);
+                if (buf.h_output)
+                    cudaFreeHost(buf.h_output);
+                if (buf.d_output)
+                    cudaFree(buf.d_output);
 
-                if (resource.h2d_done[b]) cudaEventDestroy(resource.h2d_done[b]);
-                if (resource.compute_done[b]) cudaEventDestroy(resource.compute_done[b]);
-                if (resource.d2h_done[b]) cudaEventDestroy(resource.d2h_done[b]);
+                if (resource.h2d_done[b])
+                    cudaEventDestroy(resource.h2d_done[b]);
+                if (resource.compute_done[b])
+                    cudaEventDestroy(resource.compute_done[b]);
+                if (resource.d2h_done[b])
+                    cudaEventDestroy(resource.d2h_done[b]);
             }
-            if (resource.stream) cudaStreamDestroy(resource.stream);
-            if (resource.h2d_stream) cudaStreamDestroy(resource.h2d_stream);
-            if (resource.d2h_stream) cudaStreamDestroy(resource.d2h_stream);
+            if (resource.stream)
+                cudaStreamDestroy(resource.stream);
+            if (resource.h2d_stream)
+                cudaStreamDestroy(resource.h2d_stream);
+            if (resource.d2h_stream)
+                cudaStreamDestroy(resource.d2h_stream);
         } else
 #endif // ENABLE_CUDA
         {
-            if (resource.run_options) ortapi->ReleaseRunOptions(resource.run_options);
-            if (resource.binding) ortapi->ReleaseIoBinding(resource.binding);
-            if (resource.output_tensor) ortapi->ReleaseValue(resource.output_tensor);
-            if (resource.input_tensor) ortapi->ReleaseValue(resource.input_tensor);
+            if (resource.run_options)
+                ortapi->ReleaseRunOptions(resource.run_options);
+            if (resource.binding)
+                ortapi->ReleaseIoBinding(resource.binding);
+            if (resource.output_tensor)
+                ortapi->ReleaseValue(resource.output_tensor);
+            if (resource.input_tensor)
+                ortapi->ReleaseValue(resource.input_tensor);
         }
 
         if (cpu_allocator) {
-            if (resource.input_name) ortapi->AllocatorFree(cpu_allocator, resource.input_name);
-            if (resource.output_name) ortapi->AllocatorFree(cpu_allocator, resource.output_name);
+            if (resource.input_name)
+                ortapi->AllocatorFree(cpu_allocator, resource.input_name);
+            if (resource.output_name)
+                ortapi->AllocatorFree(cpu_allocator, resource.output_name);
         }
 
-        if (resource.session) ortapi->ReleaseSession(resource.session);
+        if (resource.session)
+            ortapi->ReleaseSession(resource.session);
     }
 
     ortapi->ReleaseEnv(d->environment);
@@ -874,16 +820,9 @@ static void VS_CC vsOrtFree(
     delete d;
 }
 
+static void VS_CC vsOrtCreate(const VSMap* in, VSMap* out, void* userData, VSCore* core, const VSAPI* vsapi) noexcept {
 
-static void VS_CC vsOrtCreate(
-    const VSMap *in,
-    VSMap *out,
-    void *userData,
-    VSCore *core,
-    const VSAPI *vsapi
-) noexcept {
-
-    auto d { std::make_unique<vsOrtData>() };
+    auto d{std::make_unique<vsOrtData>()};
 
     int num_nodes = vsapi->mapNumElements(in, "clips");
     if (num_nodes <= 0) {
@@ -895,16 +834,16 @@ static void VS_CC vsOrtCreate(
         d->nodes.emplace_back(vsapi->mapGetNode(in, "clips", i, nullptr));
     }
 
-    auto set_error = [&](const std::string & error_message) {
+    auto set_error = [&](const std::string& error_message) {
         vsapi->mapSetError(out, (__func__ + ": "s + error_message).c_str());
-        for (const auto & node : d->nodes) {
+        for (const auto& node : d->nodes) {
             vsapi->freeNode(node);
         }
     };
 
-    std::vector<const VSVideoInfo *> in_vis;
+    std::vector<const VSVideoInfo*> in_vis;
     in_vis.reserve(std::size(d->nodes));
-    for (const auto & node : d->nodes) {
+    for (const auto& node : d->nodes) {
         in_vis.emplace_back(vsapi->getVideoInfo(node));
     }
 
@@ -914,7 +853,6 @@ static void VS_CC vsOrtCreate(
 
     d->out_vi = std::make_unique<VSVideoInfo>(*in_vis.front()); // mutable
 
-
     int error;
 
     d->device_id = vsapi->mapGetIntSaturated(in, "device_id", 0, &error);
@@ -922,9 +860,7 @@ static void VS_CC vsOrtCreate(
         d->device_id = 0;
     }
 
-    auto verbosity = static_cast<OrtLoggingLevel>(
-        vsapi->mapGetIntSaturated(in, "verbosity", 0, &error)
-    );
+    auto verbosity = static_cast<OrtLoggingLevel>(vsapi->mapGetIntSaturated(in, "verbosity", 0, &error));
     if (error) {
         verbosity = ORT_LOGGING_LEVEL_WARNING;
     }
@@ -940,7 +876,7 @@ static void VS_CC vsOrtCreate(
     } else {
         return set_error("\"ml_program\" must be 0 or 1");
     }
-#endif //ENABLE_COREML
+#endif // ENABLE_COREML
 
     // match verbosity of vs-trt
     verbosity = static_cast<OrtLoggingLevel>(4 - static_cast<int>(verbosity));
@@ -980,7 +916,7 @@ static void VS_CC vsOrtCreate(
         return set_error("\"overlap\" too large");
     }
 
-    const char * provider = vsapi->mapGetData(in, "provider", 0, &error);
+    const char* provider = vsapi->mapGetData(in, "provider", 0, &error);
     if (error) {
         provider = "";
     }
@@ -1088,12 +1024,33 @@ static void VS_CC vsOrtCreate(
         int num = vsapi->mapNumElements(in, "fp16_blacklist_ops");
         if (num == -1) {
             fp16_blacklist_ops = {
-                "ArrayFeatureExtractor", "Binarizer", "CastMap", "CategoryMapper",
-                "DictVectorizer", "FeatureVectorizer", "Imputer", "LabelEncoder",
-                "LinearClassifier", "LinearRegressor", "Normalizer", "OneHotEncoder",
-                "SVMClassifier", "SVMRegressor", "Scaler", "TreeEnsembleClassifier",
-                "TreeEnsembleRegressor", "ZipMap", "NonMaxSuppression", "TopK",
-                "RoiAlign", "Range", "CumSum", "Min", "Max", "Resize", "Upsample",
+                "ArrayFeatureExtractor",
+                "Binarizer",
+                "CastMap",
+                "CategoryMapper",
+                "DictVectorizer",
+                "FeatureVectorizer",
+                "Imputer",
+                "LabelEncoder",
+                "LinearClassifier",
+                "LinearRegressor",
+                "Normalizer",
+                "OneHotEncoder",
+                "SVMClassifier",
+                "SVMRegressor",
+                "Scaler",
+                "TreeEnsembleClassifier",
+                "TreeEnsembleRegressor",
+                "ZipMap",
+                "NonMaxSuppression",
+                "TopK",
+                "RoiAlign",
+                "Range",
+                "CumSum",
+                "Min",
+                "Max",
+                "Resize",
+                "Upsample",
                 "ReduceMean", // for CUGAN-pro
                 "GridSample", // for RIFE, etc
             };
@@ -1136,23 +1093,23 @@ static void VS_CC vsOrtCreate(
     auto logger_id_str = "vs-ort" + std::to_string(logger_id.fetch_add(1, std::memory_order_relaxed));
     checkError(ortapi->CreateEnv(verbosity, logger_id_str.c_str(), &d->environment));
 
-    OrtMemoryInfo * memory_info;
+    OrtMemoryInfo* memory_info;
 #ifdef ENABLE_CUDA
     if (d->backend == Backend::CUDA) {
-        checkError(ortapi->CreateMemoryInfo(
-            "Cuda", OrtDeviceAllocator, d->device_id,
-            OrtMemTypeDefault, &memory_info
-        ));
+        checkError(ortapi->CreateMemoryInfo("Cuda", OrtDeviceAllocator, d->device_id, OrtMemTypeDefault, &memory_info));
     } else
 #endif // ENABLE_CUDA
     {
         checkError(ortapi->CreateMemoryInfo(
-            "Cpu", OrtDeviceAllocator, /* device_id */ 0,
-            OrtMemTypeDefault, &memory_info
+            "Cpu",
+            OrtDeviceAllocator,
+            /* device_id */ 0,
+            OrtMemTypeDefault,
+            &memory_info
         ));
     }
 
-    OrtAllocator * cpu_allocator;
+    OrtAllocator* cpu_allocator;
     checkError(ortapi->GetAllocatorWithDefaultOptions(&cpu_allocator));
 
     // per-stream context
@@ -1165,12 +1122,9 @@ static void VS_CC vsOrtCreate(
     for (int i = 0; i < num_streams; ++i) {
         Resource resource;
 
-        OrtSessionOptions * session_options;
+        OrtSessionOptions* session_options;
         checkError(ortapi->CreateSessionOptions(&session_options));
-        checkError(ortapi->SetSessionExecutionMode(
-            session_options,
-            ExecutionMode::ORT_SEQUENTIAL
-        ));
+        checkError(ortapi->SetSessionExecutionMode(session_options, ExecutionMode::ORT_SEQUENTIAL));
 
         if (d->backend == Backend::CUDA || d->backend == Backend::DML) {
             checkError(ortapi->SetIntraOpNumThreads(session_options, 1));
@@ -1200,21 +1154,21 @@ static void VS_CC vsOrtCreate(
                 checkCUDAError(cudaEventCreateWithFlags(&resource.d2h_done[b], cudaEventDisableTiming));
             }
 
-            OrtCUDAProviderOptionsV2 * cuda_options;
+            OrtCUDAProviderOptionsV2* cuda_options;
             checkError(ortapi->CreateCUDAProviderOptions(&cuda_options));
 #ifdef _MSC_VER
             // Preload cuda dll from vsort directory.
             static std::once_flag cuda_dll_preloaded_flag;
             static bool cuda_dll_preload_ok;
             std::call_once(cuda_dll_preloaded_flag, []() {
-                    extern bool preloadCudaDlls();
-                    cuda_dll_preload_ok = preloadCudaDlls();
+                extern bool preloadCudaDlls();
+                cuda_dll_preload_ok = preloadCudaDlls();
             });
             if (!cuda_dll_preload_ok)
                 return set_error("cuda DLL preloading failed");
 
 #endif // _MSC_VER
-            const char * keys [] {
+            const char* keys[]{
                 "device_id",
                 "cudnn_conv_algo_search",
                 "cudnn_conv_use_max_workspace",
@@ -1224,7 +1178,7 @@ static void VS_CC vsOrtCreate(
                 "use_tf32",
             };
             auto device_id_str = std::to_string(d->device_id);
-            const char * values [] {
+            const char* values[]{
                 device_id_str.c_str(),
                 cudnn_benchmark ? "EXHAUSTIVE" : "HEURISTIC",
                 "1",
@@ -1236,11 +1190,9 @@ static void VS_CC vsOrtCreate(
             resource.require_replay = use_cuda_graph;
 
             checkError(ortapi->UpdateCUDAProviderOptions(cuda_options, keys, values, std::size(keys)));
-            checkError(ortapi->UpdateCUDAProviderOptionsWithValue(
-                cuda_options,
-                "user_compute_stream",
-                resource.stream
-            ));
+            checkError(
+                ortapi->UpdateCUDAProviderOptionsWithValue(cuda_options, "user_compute_stream", resource.stream)
+            );
 
             checkError(ortapi->SessionOptionsAppendExecutionProvider_CUDA_V2(session_options, cuda_options));
 
@@ -1249,28 +1201,23 @@ static void VS_CC vsOrtCreate(
 #endif // ENABLE_CUDA
 #ifdef ENABLE_COREML
         uint32_t coreml_flag = 0;
-        if (ml_program) coreml_flag |= 0x010;
+        if (ml_program)
+            coreml_flag |= 0x010;
         if (d->backend == Backend::COREML) {
-            checkError(OrtSessionOptionsAppendExecutionProvider_CoreML(
-                session_options,
-                coreml_flag
-            ));
+            checkError(OrtSessionOptionsAppendExecutionProvider_CoreML(session_options, coreml_flag));
         }
 #endif // ENABLE_COREML
 #ifdef ENABLE_DML
         if (d->backend == Backend::DML) {
-            const OrtDmlApi * ortdmlapi {};
-            checkError(ortapi->GetExecutionProviderApi("DML", ORT_API_VERSION, (const void **) &ortdmlapi));
+            const OrtDmlApi* ortdmlapi{};
+            checkError(ortapi->GetExecutionProviderApi("DML", ORT_API_VERSION, (const void**)&ortdmlapi));
             checkError(ortdmlapi->SessionOptionsAppendExecutionProvider_DML(session_options, d->device_id));
             resource.require_replay = true;
         }
 #endif // ENABLE_DML
 
         checkError(ortapi->CreateSessionFromArray(
-            d->environment,
-            std::data(onnx_data), std::size(onnx_data),
-            session_options,
-            &resource.session
+            d->environment, std::data(onnx_data), std::size(onnx_data), session_options, &resource.session
         ));
 
         ortapi->ReleaseSessionOptions(session_options);
@@ -1279,32 +1226,22 @@ static void VS_CC vsOrtCreate(
             return set_error(err.value());
         }
 
-        auto input_shape = std::get<std::array<int64_t, 4>>(
-            getShape(resource.session, true)
-        );
-        auto output_shape = std::get<std::array<int64_t, 4>>(
-            getShape(resource.session, false)
-        );
+        auto input_shape = std::get<std::array<int64_t, 4>>(getShape(resource.session, true));
+        auto output_shape = std::get<std::array<int64_t, 4>>(getShape(resource.session, false));
 
-        checkError(ortapi->SessionGetInputName(
-            resource.session, 0, cpu_allocator, &resource.input_name
-        ));
-        checkError(ortapi->SessionGetOutputName(
-            resource.session, 0, cpu_allocator, &resource.output_name
-        ));
+        checkError(ortapi->SessionGetInputName(resource.session, 0, cpu_allocator, &resource.input_name));
+        checkError(ortapi->SessionGetOutputName(resource.session, 0, cpu_allocator, &resource.output_name));
 
 #ifdef ENABLE_CUDA
         if (d->backend == Backend::CUDA) {
-            size_t in_size = (
-                input_shape[0] * input_shape[1] * input_shape[2] * input_shape[3]
-            ) * getNumBytes(onnx_input_type);
+            size_t in_size =
+                (input_shape[0] * input_shape[1] * input_shape[2] * input_shape[3]) * getNumBytes(onnx_input_type);
 
-            size_t out_size = (
-                output_shape[0] * output_shape[1] * output_shape[2] * output_shape[3]
-            ) * getNumBytes(onnx_output_type);
+            size_t out_size =
+                (output_shape[0] * output_shape[1] * output_shape[2] * output_shape[3]) * getNumBytes(onnx_output_type);
 
             for (size_t b = 0; b < Resource::kNumBuffers; ++b) {
-                auto & buf = resource.cuda_buffers[b];
+                auto& buf = resource.cuda_buffers[b];
                 buf.input_size = in_size;
                 buf.output_size = out_size;
 
@@ -1313,8 +1250,10 @@ static void VS_CC vsOrtCreate(
 
                 checkError(ortapi->CreateTensorWithDataAsOrtValue(
                     memory_info,
-                    buf.d_input, buf.input_size,
-                    std::data(input_shape), std::size(input_shape),
+                    buf.d_input,
+                    buf.input_size,
+                    std::data(input_shape),
+                    std::size(input_shape),
                     static_cast<ONNXTensorElementDataType>(onnx_input_type),
                     &buf.input_tensor
                 ));
@@ -1324,8 +1263,10 @@ static void VS_CC vsOrtCreate(
 
                 checkError(ortapi->CreateTensorWithDataAsOrtValue(
                     memory_info,
-                    buf.d_output, buf.output_size,
-                    std::data(output_shape), std::size(output_shape),
+                    buf.d_output,
+                    buf.output_size,
+                    std::data(output_shape),
+                    std::size(output_shape),
                     static_cast<ONNXTensorElementDataType>(onnx_output_type),
                     &buf.output_tensor
                 ));
@@ -1336,15 +1277,11 @@ static void VS_CC vsOrtCreate(
 
                 checkError(ortapi->CreateRunOptions(&buf.run_options));
                 checkError(ortapi->AddRunConfigEntry(
-                    buf.run_options,
-                    kOrtRunOptionsConfigDisableSynchronizeExecutionProviders,
-                    "1"
+                    buf.run_options, kOrtRunOptionsConfigDisableSynchronizeExecutionProviders, "1"
                 ));
                 if (use_cuda_graph) {
                     checkError(ortapi->AddRunConfigEntry(
-                        buf.run_options,
-                        kOrtRunOptionsConfigCudaGraphAnnotation,
-                        std::to_string(b + 1).c_str()
+                        buf.run_options, kOrtRunOptionsConfigCudaGraphAnnotation, std::to_string(b + 1).c_str()
                     ));
                 }
             }
@@ -1353,14 +1290,16 @@ static void VS_CC vsOrtCreate(
         {
             checkError(ortapi->CreateTensorAsOrtValue(
                 cpu_allocator,
-                std::data(input_shape), std::size(input_shape),
+                std::data(input_shape),
+                std::size(input_shape),
                 static_cast<ONNXTensorElementDataType>(onnx_input_type),
                 &resource.input_tensor
             ));
 
             checkError(ortapi->CreateTensorAsOrtValue(
                 cpu_allocator,
-                std::data(output_shape), std::size(output_shape),
+                std::data(output_shape),
+                std::size(output_shape),
                 static_cast<ONNXTensorElementDataType>(onnx_output_type),
                 &resource.output_tensor
             ));
@@ -1378,12 +1317,7 @@ static void VS_CC vsOrtCreate(
 
         if (i == 0) {
             setDimensions(
-                d->out_vi,
-                input_shape,
-                output_shape,
-                core, vsapi,
-                onnx_output_type,
-                !d->flexible_output_prop.empty()
+                d->out_vi, input_shape, output_shape, core, vsapi, onnx_output_type, !d->flexible_output_prop.empty()
             );
 
             if (!d->flexible_output_prop.empty()) {
@@ -1399,14 +1333,12 @@ static void VS_CC vsOrtCreate(
     if (d->backend == Backend::CUDA && use_cuda_graph) {
         // Sequentially warm up and capture graphs for all resources and buffers
         // to prevent multi-threaded stream capture collision in global mode
-        for (auto & res : d->resources) {
+        for (auto& res : d->resources) {
             checkCUDAError(cudaSetDevice(d->device_id));
             for (size_t b = 0; b < Resource::kNumBuffers; ++b) {
-                checkError(ortapi->RunWithBinding(
-                    res.session,
-                    res.cuda_buffers[b].run_options,
-                    res.cuda_buffers[b].binding
-                ));
+                checkError(
+                    ortapi->RunWithBinding(res.session, res.cuda_buffers[b].run_options, res.cuda_buffers[b].binding)
+                );
             }
             checkCUDAError(cudaStreamSynchronize(res.stream));
         }
@@ -1414,7 +1346,8 @@ static void VS_CC vsOrtCreate(
 #endif // ENABLE_CUDA
 
     if (in_vis.front()->width > 0 && in_vis.front()->height > 0) {
-        d->static_tiles = generateTiles(in_vis.front()->width, in_vis.front()->height, tile_w, tile_h, d->overlap_w, d->overlap_h);
+        d->static_tiles =
+            generateTiles(in_vis.front()->width, in_vis.front()->height, tile_w, tile_h, d->overlap_w, d->overlap_h);
         d->has_static_tiles = true;
     }
 
@@ -1422,12 +1355,12 @@ static void VS_CC vsOrtCreate(
 
     std::vector<VSFilterDependency> deps;
     deps.reserve(d->nodes.size());
-    for (auto *node : d->nodes) {
+    for (auto* node : d->nodes) {
         deps.push_back({node, rpGeneral});
     }
 
-    auto *out_vi = d->out_vi.get();
-    auto *instance_data = d.release();
+    auto* out_vi = d->out_vi.get();
+    auto* instance_data = d.release();
 
     vsapi->createVideoFilter(
         out,
@@ -1443,11 +1376,8 @@ static void VS_CC vsOrtCreate(
     );
 }
 
-
-VS_EXTERNAL_API(void) VapourSynthPluginInit2(
-    VSPlugin *plugin,
-    const VSPLUGINAPI *vspapi
-) {
+VS_EXTERNAL_API(void)
+VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI* vspapi) {
     vspapi->configPlugin(
         PLUGIN_ID,
         "ort",
@@ -1464,7 +1394,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
         "network_path:data;"
         "overlap:int[]:opt;"
         "tilesize:int[]:opt;"
-        "provider:data:opt;" // "": Default (CPU), "CUDA": CUDA, "COREML": COREML, "DML": DML
+        "provider:data:opt;" // "": Default (CPU), "CUDA": CUDA, "COREML": COREML,
+                             // "DML": DML
         "device_id:int:opt;"
         "num_streams:int:opt;"
         "verbosity:int:opt;"
@@ -1487,9 +1418,11 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
         plugin
     );
 
-    auto getVersion = [](const VSMap *, VSMap * out, void *, VSCore * core, const VSAPI *vsapi) {
+    auto getVersion = [](const VSMap*, VSMap* out, void*, VSCore* core, const VSAPI* vsapi) {
         vsapi->mapSetData(out, "version", PLUGIN_VERSION_STRING, -1, dtUtf8, maReplace);
-        vsapi->mapSetData(out, "onnxruntime_api_version_build", std::to_string(ORT_API_VERSION).c_str(), -1, dtUtf8, maReplace);
+        vsapi->mapSetData(
+            out, "onnxruntime_api_version_build", std::to_string(ORT_API_VERSION).c_str(), -1, dtUtf8, maReplace
+        );
 
         if (auto err = ortInit(); err.has_value()) {
             vsapi->logMessage(mtWarning, err.value().c_str(), nullptr);
@@ -1501,7 +1434,9 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
         }
 
 #ifdef ENABLE_CUDA
-        vsapi->mapSetData(out, "cuda_runtime_version", std::to_string(__CUDART_API_VERSION).c_str(), -1, dtUtf8, maReplace);
+        vsapi->mapSetData(
+            out, "cuda_runtime_version", std::to_string(__CUDART_API_VERSION).c_str(), -1, dtUtf8, maReplace
+        );
 #endif
         vsapi->mapSetData(out, "onnx_version", ONNX_NAMESPACE::LAST_RELEASE_VERSION, -1, dtUtf8, maReplace);
         auto plugin = vsapi->getPluginByID(PLUGIN_ID, core);

@@ -1,8 +1,13 @@
+#include <VSConstants4.h>
+#include <VSHelper4.h>
+#include <VapourSynth4.h>
 #include <array>
 #include <atomic>
 #include <concepts>
 #include <cstdint>
+#include <hip/hip_runtime.h>
 #include <memory>
+#include <migraphx/migraphx.h>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -11,14 +16,6 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
-
-#include <VapourSynth4.h>
-#include <VSHelper4.h>
-#include <VSConstants4.h>
-
-#include <hip/hip_runtime.h>
-
-#include <migraphx/migraphx.h>
 
 #if __has_include(<migraphx/version.h>)
 #include <migraphx/version.h>
@@ -38,48 +35,50 @@
 
 using namespace std::string_literals;
 
-#define checkError(expr) do {                                                  \
-    using namespace std::string_literals;                                      \
-    migraphx_status __err = expr;                                              \
-    if (__err != migraphx_status_success) {                                    \
-        const char * message = getErrorString(__err);                          \
-        return set_error("'"s + # expr + "' failed: " + message);              \
-    }                                                                          \
-} while(0)
+#define checkError(expr)                                                                                               \
+    do {                                                                                                               \
+        using namespace std::string_literals;                                                                          \
+        migraphx_status __err = expr;                                                                                  \
+        if (__err != migraphx_status_success) {                                                                        \
+            const char* message = getErrorString(__err);                                                               \
+            return set_error("'"s + #expr + "' failed: " + message);                                                   \
+        }                                                                                                              \
+    } while (0)
 
-#define checkHIPError(expr) do {                                               \
-    using namespace std::string_literals;                                      \
-    hipError_t __err = expr;                                                   \
-    if (__err != hipSuccess) {                                                 \
-        const char * message = hipGetErrorString(__err);                       \
-        return set_error("'"s + # expr + "' failed: " + message);              \
-    }                                                                          \
-} while(0)
+#define checkHIPError(expr)                                                                                            \
+    do {                                                                                                               \
+        using namespace std::string_literals;                                                                          \
+        hipError_t __err = expr;                                                                                       \
+        if (__err != hipSuccess) {                                                                                     \
+            const char* message = hipGetErrorString(__err);                                                            \
+            return set_error("'"s + #expr + "' failed: " + message);                                                   \
+        }                                                                                                              \
+    } while (0)
 
 #define PLUGIN_ID "io.github.amusementclub.vs_migraphx"
 
-static inline const char * getErrorString(migraphx_status status) {
+static inline const char* getErrorString(migraphx_status status) {
     switch (status) {
-        case migraphx_status_success:
-            return "success";
-        case migraphx_status_bad_param:
-            return "bad param";
-        case migraphx_status_unknown_target:
-            return "unknown target";
-        case migraphx_status_unknown_error:
-            return "unknown error";
-        default:
-            return "undefined error";
+    case migraphx_status_success:
+        return "success";
+    case migraphx_status_bad_param:
+        return "bad param";
+    case migraphx_status_unknown_target:
+        return "unknown target";
+    case migraphx_status_unknown_error:
+        return "unknown error";
+    default:
+        return "undefined error";
     }
 }
 
 static void setDimensions(
-    std::unique_ptr<VSVideoInfo> & vi,
-    const std::array<int, 4> & input_shape,
-    const std::array<int, 4> & output_shape,
+    std::unique_ptr<VSVideoInfo>& vi,
+    const std::array<int, 4>& input_shape,
+    const std::array<int, 4>& output_shape,
     int bitsPerSample,
-    VSCore * core,
-    const VSAPI * vsapi,
+    VSCore* core,
+    const VSAPI* vsapi,
     bool flexible_output
 ) noexcept {
 
@@ -93,12 +92,9 @@ static void setDimensions(
     }
 }
 
-static inline
-std::optional<std::string> checkNodes(
-    const std::vector<const VSVideoInfo *> & vis
-) noexcept {
+static inline std::optional<std::string> checkNodes(const std::vector<const VSVideoInfo*>& vis) noexcept {
 
-    for (const auto & vi : vis) {
+    for (const auto& vi : vis) {
         if (!vsh::isConstantVideoFormat(vi)) {
             return "video format must be constant";
         }
@@ -127,14 +123,11 @@ std::optional<std::string> checkNodes(
     return {};
 }
 
-static inline
-int numPlanes(
-    const std::vector<const VSVideoInfo *> & vis
-) noexcept {
+static inline int numPlanes(const std::vector<const VSVideoInfo*>& vis) noexcept {
 
     int num_planes = 0;
 
-    for (const auto & vi : vis) {
+    for (const auto& vi : vis) {
         num_planes += vi->format.numPlanes;
     }
 
@@ -142,46 +135,41 @@ int numPlanes(
 }
 
 // 0: integer, 1: float, -1: unknown
-static inline
-int getSampleType(migraphx_shape_datatype_t type) noexcept {
+static inline int getSampleType(migraphx_shape_datatype_t type) noexcept {
     switch (type) {
-        case migraphx_shape_uint8_type:
-        case migraphx_shape_uint16_type:
-        case migraphx_shape_uint32_type:
-        case migraphx_shape_uint64_type:
-            return 0;
-        case migraphx_shape_half_type:
-        case migraphx_shape_float_type:
-        case migraphx_shape_double_type:
-            return 1;
-        default:
-            return -1;
+    case migraphx_shape_uint8_type:
+    case migraphx_shape_uint16_type:
+    case migraphx_shape_uint32_type:
+    case migraphx_shape_uint64_type:
+        return 0;
+    case migraphx_shape_half_type:
+    case migraphx_shape_float_type:
+    case migraphx_shape_double_type:
+        return 1;
+    default:
+        return -1;
     }
 }
 
-static inline
-int getBytesPerSample(migraphx_shape_datatype_t type) noexcept {
+static inline int getBytesPerSample(migraphx_shape_datatype_t type) noexcept {
     switch (type) {
-        case migraphx_shape_uint8_type:
-            return 1;
-        case migraphx_shape_half_type:
-        case migraphx_shape_uint16_type:
-            return 2;
-        case migraphx_shape_float_type:
-        case migraphx_shape_uint32_type:
-            return 4;
-        case migraphx_shape_double_type:
-        case migraphx_shape_uint64_type:
-            return 8;
-        default:
-            return 0;
+    case migraphx_shape_uint8_type:
+        return 1;
+    case migraphx_shape_half_type:
+    case migraphx_shape_uint16_type:
+        return 2;
+    case migraphx_shape_float_type:
+    case migraphx_shape_uint32_type:
+        return 4;
+    case migraphx_shape_double_type:
+    case migraphx_shape_uint64_type:
+        return 8;
+    default:
+        return 0;
     }
 }
 
-static inline void VS_CC getDeviceProp(
-    const VSMap *in, VSMap *out, void *userData,
-    VSCore *core, const VSAPI *vsapi
-) {
+static inline void VS_CC getDeviceProp(const VSMap* in, VSMap* out, void* userData, VSCore* core, const VSAPI* vsapi) {
 
     int err;
     int device_id = vsapi->mapGetIntSaturated(in, "device_id", 0, &err);
@@ -192,14 +180,14 @@ static inline void VS_CC getDeviceProp(
     hipDeviceProp_t prop;
     if (auto err = hipGetDeviceProperties(&prop, device_id); err != hipSuccess) {
         vsapi->mapSetError(out, hipGetErrorString(err));
-        return ;
+        return;
     }
 
-    auto setProp = [&](const char * name, auto value, int data_length = -1) {
+    auto setProp = [&](const char* name, auto value, int data_length = -1) {
         using T = std::decay_t<decltype(value)>;
         if constexpr (std::is_integral_v<T>) {
             vsapi->mapSetInt(out, name, static_cast<int64_t>(value), maReplace);
-        } else if constexpr (std::is_same_v<T, char *> || std::is_same_v<T, const char *>) {
+        } else if constexpr (std::is_same_v<T, char*> || std::is_same_v<T, const char*>) {
             vsapi->mapSetData(out, name, value, data_length, dtUtf8, maReplace);
         }
     };
@@ -207,7 +195,7 @@ static inline void VS_CC getDeviceProp(
     int driver_version;
     if (auto err = hipDriverGetVersion(&driver_version); err != hipSuccess) {
         vsapi->mapSetError(out, hipGetErrorString(err));
-        return ;
+        return;
     }
     setProp("driver_version", driver_version);
 
@@ -263,17 +251,11 @@ static inline void VS_CC getDeviceProp(
     setProp("pageable_memory_access", prop.pageableMemoryAccess);
     setProp("conccurrent_managed_access", prop.concurrentManagedAccess);
     setProp("compute_preemption_supported", prop.computePreemptionSupported);
-    setProp(
-        "can_use_host_pointer_for_registered_mem",
-        prop.canUseHostPointerForRegisteredMem
-    );
+    setProp("can_use_host_pointer_for_registered_mem", prop.canUseHostPointerForRegisteredMem);
     setProp("cooperative_launch", prop.cooperativeLaunch);
     setProp("cooperative_multi_device_launch", prop.cooperativeMultiDeviceLaunch);
     setProp("shared_mem_per_block_optin", prop.sharedMemPerBlockOptin);
-    setProp(
-        "pageable_memory_access_uses_host_page_tables",
-        prop.pageableMemoryAccessUsesHostPageTables
-    );
+    setProp("pageable_memory_access_uses_host_page_tables", prop.pageableMemoryAccessUsesHostPageTables);
     setProp("direct_managed_mem_access_from_host", prop.directManagedMemAccessFromHost);
     setProp("max_blocks_per_multi_processor", prop.maxBlocksPerMultiProcessor);
     setProp("access_policy_max_window_size", prop.accessPolicyMaxWindowSize);
@@ -303,19 +285,16 @@ static inline void VS_CC getDeviceProp(
     setProp("asic_revision", prop.asicRevision);
 };
 
-
 struct TicketSemaphore {
-    std::atomic<intptr_t> ticket {};
-    std::atomic<intptr_t> current {};
+    std::atomic<intptr_t> ticket{};
+    std::atomic<intptr_t> current{};
 
-    void init(intptr_t num) noexcept {
-        current.store(num, std::memory_order::seq_cst);
-    }
+    void init(intptr_t num) noexcept { current.store(num, std::memory_order::seq_cst); }
 
     void acquire() noexcept {
-        intptr_t tk { ticket.fetch_add(1, std::memory_order::acquire) };
+        intptr_t tk{ticket.fetch_add(1, std::memory_order::acquire)};
         while (true) {
-            intptr_t curr { current.load(std::memory_order::acquire) };
+            intptr_t curr{current.load(std::memory_order::acquire)};
             if (tk < curr) {
                 return;
             }
@@ -330,12 +309,8 @@ struct TicketSemaphore {
 };
 
 template <typename T, auto deleter>
-    requires
-        std::default_initializable<T> &&
-        std::movable<T> &&
-        std::is_trivially_copy_assignable_v<T> &&
-        std::convertible_to<T, bool> &&
-        std::invocable<decltype(deleter), T>
+    requires std::default_initializable<T> && std::movable<T> && std::is_trivially_copy_assignable_v<T> &&
+             std::convertible_to<T, bool> && std::invocable<decltype(deleter), T>
 struct Resource {
     T data;
 
@@ -343,48 +318,45 @@ struct Resource {
     constexpr Resource() noexcept = default;
 
     [[nodiscard]]
-    constexpr Resource(T && x) noexcept : data(x) {}
+    constexpr Resource(T&& x) noexcept
+        : data(x) {}
 
     [[nodiscard]]
     constexpr Resource(Resource&& other) noexcept
-        : data(std::exchange(other.data, T{}))
-    { }
+        : data(std::exchange(other.data, T{})) {}
 
     constexpr Resource& operator=(Resource&& other) noexcept {
-        if (this == &other) return *this;
+        if (this == &other)
+            return *this;
         deleter_(std::move(data));
         data = std::exchange(other.data, T{});
         return *this;
     }
 
-    constexpr Resource& operator=(const Resource & other) = delete;
+    constexpr Resource& operator=(const Resource& other) = delete;
 
     Resource(const Resource& other) = delete;
 
-    constexpr operator T() const noexcept {
-        return data;
-    }
+    constexpr operator T() const noexcept { return data; }
 
-    constexpr auto deleter_(T && x) noexcept {
+    constexpr auto deleter_(T&& x) noexcept {
         if (x) {
-            (void) deleter(x);
+            (void)deleter(x);
         }
     }
 
-    constexpr Resource& operator=(T && x) noexcept {
+    constexpr Resource& operator=(T&& x) noexcept {
         deleter_(std::move(data));
         data = x;
         return *this;
     }
 
-    constexpr ~Resource() noexcept {
-        deleter_(std::move(data));
-    }
+    constexpr ~Resource() noexcept { deleter_(std::move(data)); }
 };
 
 struct MemoryResource {
-    Resource<uint8_t *, hipHostFree> h_data;
-    Resource<uint8_t *, hipFree> d_data;
+    Resource<uint8_t*, hipHostFree> h_data;
+    Resource<uint8_t*, hipFree> d_data;
     size_t size;
 };
 
@@ -398,7 +370,7 @@ struct InferenceInstance {
 };
 
 struct vsMIGXData {
-    std::vector<VSNode *> nodes;
+    std::vector<VSNode*> nodes;
     std::unique_ptr<VSVideoInfo> out_vi;
 
     std::array<int, 4> src_tile_shape, dst_tile_shape;
@@ -433,33 +405,32 @@ struct vsMIGXData {
     }
 };
 
-
-static const VSFrame *VS_CC vsMIGXGetFrame(
+static const VSFrame* VS_CC vsMIGXGetFrame(
     int n,
     int activationReason,
-    void *instanceData,
-    void **frameData,
-    VSFrameContext *frameCtx,
-    VSCore *core,
-    const VSAPI *vsapi
+    void* instanceData,
+    void** frameData,
+    VSFrameContext* frameCtx,
+    VSCore* core,
+    const VSAPI* vsapi
 ) noexcept {
 
-    auto d = static_cast<vsMIGXData *>(instanceData);
+    auto d = static_cast<vsMIGXData*>(instanceData);
 
     if (activationReason == arInitial) {
-        for (const auto & node : d->nodes) {
+        for (const auto& node : d->nodes) {
             vsapi->requestFrameFilter(n, node, frameCtx);
         }
     } else if (activationReason == arAllFramesReady) {
-        std::vector<const VSVideoInfo *> in_vis;
+        std::vector<const VSVideoInfo*> in_vis;
         in_vis.reserve(std::size(d->nodes));
-        for (const auto & node : d->nodes) {
+        for (const auto& node : d->nodes) {
             in_vis.emplace_back(vsapi->getVideoInfo(node));
         }
 
-        std::vector<const VSFrame *> src_frames;
+        std::vector<const VSFrame*> src_frames;
         src_frames.reserve(std::size(d->nodes));
-        for (const auto & node : d->nodes) {
+        for (const auto& node : d->nodes) {
             src_frames.emplace_back(vsapi->getFrameFilter(n, node, frameCtx));
         }
 
@@ -468,25 +439,23 @@ static const VSFrame *VS_CC vsMIGXGetFrame(
         auto src_height = vsapi->getFrameHeight(src_frames.front(), 0);
         auto src_bytes = vsapi->getVideoFrameFormat(src_frames.front())->bytesPerSample;
 
-        VSFrame * const dst_frame = vsapi->newVideoFrame(
-            &d->out_vi->format, d->out_vi->width, d->out_vi->height,
-            src_frames.front(), core
-        );
+        VSFrame* const dst_frame =
+            vsapi->newVideoFrame(&d->out_vi->format, d->out_vi->width, d->out_vi->height, src_frames.front(), core);
 
-        std::vector<VSFrame *> dst_frames;
+        std::vector<VSFrame*> dst_frames;
 
         auto dst_stride = vsapi->getStride(dst_frame, 0);
         auto dst_bytes = vsapi->getVideoFrameFormat(dst_frame)->bytesPerSample;
 
         auto ticket = d->acquire();
-        InferenceInstance & instance = d->instances[ticket];
+        InferenceInstance& instance = d->instances[ticket];
 
         auto src_tile_h = d->src_tile_shape[2];
         auto src_tile_w = d->src_tile_shape[3];
         auto src_tile_w_bytes = src_tile_w * src_bytes;
         auto src_tile_bytes = src_tile_h * src_tile_w_bytes;
 
-        std::vector<const uint8_t *> src_ptrs;
+        std::vector<const uint8_t*> src_ptrs;
         src_ptrs.reserve(d->src_tile_shape[1]);
         for (unsigned i = 0; i < std::size(d->nodes); ++i) {
             for (int j = 0; j < in_vis[i]->format.numPlanes; ++j) {
@@ -503,17 +472,16 @@ static const VSFrame *VS_CC vsMIGXGetFrame(
         auto dst_tile_bytes = dst_tile_h * dst_tile_w_bytes;
         auto dst_planes = d->dst_tile_shape[1];
 
-        std::vector<uint8_t *> dst_ptrs;
+        std::vector<uint8_t*> dst_ptrs;
         if (d->flexible_output_prop.empty()) {
             for (int i = 0; i < dst_planes; ++i) {
                 dst_ptrs.emplace_back(vsapi->getWritePtr(dst_frame, i));
             }
         } else {
             for (int i = 0; i < dst_planes; ++i) {
-                auto frame { vsapi->newVideoFrame(
-                    &d->out_vi->format, d->out_vi->width, d->out_vi->height,
-                    src_frames[0], core
-                )};
+                auto frame{
+                    vsapi->newVideoFrame(&d->out_vi->format, d->out_vi->width, d->out_vi->height, src_frames[0], core)
+                };
                 dst_frames.emplace_back(frame);
                 dst_ptrs.emplace_back(vsapi->getWritePtr(frame, 0));
             }
@@ -522,21 +490,18 @@ static const VSFrame *VS_CC vsMIGXGetFrame(
         auto h_scale = dst_tile_h / src_tile_h;
         auto w_scale = dst_tile_w / src_tile_w;
 
-        const auto set_error = [&](const std::string & error_message) {
-            vsapi->setFilterError(
-                (__func__ + ": "s + error_message).c_str(),
-                frameCtx
-            );
+        const auto set_error = [&](const std::string& error_message) {
+            vsapi->setFilterError((__func__ + ": "s + error_message).c_str(), frameCtx);
 
             d->release(ticket);
 
-            for (const auto & frame : dst_frames) {
+            for (const auto& frame : dst_frames) {
                 vsapi->freeFrame(frame);
             }
 
             vsapi->freeFrame(dst_frame);
 
-            for (const auto & frame : src_frames) {
+            for (const auto& frame : src_frames) {
                 vsapi->freeFrame(frame);
             }
 
@@ -556,17 +521,13 @@ static const VSFrame *VS_CC vsMIGXGetFrame(
                 int x_crop_end = (x == src_width - src_tile_w) ? 0 : d->overlap_w;
 
                 {
-                    uint8_t * h_data = instance.src.h_data.data;
-                    for (const uint8_t * _src_ptr : src_ptrs) {
-                        const uint8_t * src_ptr { _src_ptr +
-                            y * src_stride + x * vsapi->getVideoFrameFormat(src_frames[0])->bytesPerSample
+                    uint8_t* h_data = instance.src.h_data.data;
+                    for (const uint8_t* _src_ptr : src_ptrs) {
+                        const uint8_t* src_ptr{
+                            _src_ptr + y * src_stride + x * vsapi->getVideoFrameFormat(src_frames[0])->bytesPerSample
                         };
 
-                        vsh::bitblt(
-                            h_data, src_tile_w_bytes,
-                            src_ptr, src_stride,
-                            src_tile_w_bytes, src_tile_h
-                        );
+                        vsh::bitblt(h_data, src_tile_w_bytes, src_ptr, src_stride, src_tile_w_bytes, src_tile_h);
 
                         h_data += src_tile_bytes;
                     }
@@ -584,20 +545,12 @@ static const VSFrame *VS_CC vsMIGXGetFrame(
 
 #ifdef MIGRAPHX_VERSION_TWEAK
                 checkError(migraphx_program_run_async(
-                    &outputs,
-                    d->program,
-                    instance.params,
-                    instance.stream.data,
-                    "ihipStream_t"
+                    &outputs, d->program, instance.params, instance.stream.data, "ihipStream_t"
                 ));
-#else // MIGRAPHX_VERSION_TWEAK
+#else  // MIGRAPHX_VERSION_TWEAK
                 checkHIPError(hipStreamSynchronize(instance.stream));
 
-                checkError(migraphx_program_run(
-                    &outputs,
-                    d->program,
-                    instance.params
-                ));
+                checkError(migraphx_program_run(&outputs, d->program, instance.params));
 #endif // MIGRAPHX_VERSION_TWEAK
 
                 checkHIPError(hipMemcpyAsync(
@@ -611,13 +564,10 @@ static const VSFrame *VS_CC vsMIGXGetFrame(
                 checkHIPError(hipStreamSynchronize(instance.stream));
 
                 {
-                    const uint8_t * h_data = instance.dst.h_data.data;
+                    const uint8_t* h_data = instance.dst.h_data.data;
                     auto bytes_per_sample = vsapi->getVideoFrameFormat(dst_frame)->bytesPerSample;
                     for (int plane = 0; plane < dst_planes; ++plane) {
-                        uint8_t * dst_ptr {
-                            dst_ptrs[plane] +
-                            h_scale * y * dst_stride + w_scale * x * dst_bytes
-                        };
+                        uint8_t* dst_ptr{dst_ptrs[plane] + h_scale * y * dst_stride + w_scale * x * dst_bytes};
 
                         vsh::bitblt(
                             dst_ptr + (y_crop_start * dst_stride + x_crop_start * bytes_per_sample),
@@ -648,7 +598,7 @@ static const VSFrame *VS_CC vsMIGXGetFrame(
 
         d->release(ticket);
 
-        for (const auto & frame : src_frames) {
+        for (const auto& frame : src_frames) {
             vsapi->freeFrame(frame);
         }
 
@@ -656,7 +606,7 @@ static const VSFrame *VS_CC vsMIGXGetFrame(
             auto prop = vsapi->getFramePropertiesRW(dst_frame);
 
             for (int i = 0; i < dst_planes; i++) {
-                auto key { d->flexible_output_prop + std::to_string(i) };
+                auto key{d->flexible_output_prop + std::to_string(i)};
                 vsapi->mapSetFrame(prop, key.c_str(), dst_frames[i], maReplace);
                 vsapi->freeFrame(dst_frames[i]);
             }
@@ -668,20 +618,15 @@ static const VSFrame *VS_CC vsMIGXGetFrame(
     return nullptr;
 }
 
+static void VS_CC vsMIGXFree(void* instanceData, VSCore* core, const VSAPI* vsapi) noexcept {
 
-static void VS_CC vsMIGXFree(
-    void *instanceData,
-    VSCore *core,
-    const VSAPI *vsapi
-) noexcept {
+    auto d = static_cast<vsMIGXData*>(instanceData);
 
-    auto d = static_cast<vsMIGXData *>(instanceData);
-
-    for (const auto & node : d->nodes) {
+    for (const auto& node : d->nodes) {
         vsapi->freeNode(node);
     }
 
-    auto set_error = [&](const std::string & error_message) {
+    auto set_error = [&](const std::string& error_message) {
         vsapi->logMessage(mtWarning, error_message.c_str(), core);
     };
 
@@ -690,16 +635,9 @@ static void VS_CC vsMIGXFree(
     delete d;
 }
 
+static void VS_CC vsMIGXCreate(const VSMap* in, VSMap* out, void* userData, VSCore* core, const VSAPI* vsapi) noexcept {
 
-static void VS_CC vsMIGXCreate(
-    const VSMap *in,
-    VSMap *out,
-    void *userData,
-    VSCore *core,
-    const VSAPI *vsapi
-) noexcept {
-
-    auto d { std::make_unique<vsMIGXData>() };
+    auto d{std::make_unique<vsMIGXData>()};
 
     int num_nodes = vsapi->mapNumElements(in, "clips");
     d->nodes.reserve(num_nodes);
@@ -707,9 +645,9 @@ static void VS_CC vsMIGXCreate(
         d->nodes.emplace_back(vsapi->mapGetNode(in, "clips", i, nullptr));
     }
 
-    auto set_error = [&](const std::string & error_message) {
+    auto set_error = [&](const std::string& error_message) {
         vsapi->mapSetError(out, (__func__ + ": "s + error_message).c_str());
-        for (const auto & node : d->nodes) {
+        for (const auto& node : d->nodes) {
             vsapi->freeNode(node);
         }
     };
@@ -718,14 +656,14 @@ static void VS_CC vsMIGXCreate(
     {
         migraphx_file_options_t file_options;
         checkError(migraphx_file_options_create(&file_options));
-        const char * program_path = vsapi->mapGetData(in, "program_path", 0, nullptr);
+        const char* program_path = vsapi->mapGetData(in, "program_path", 0, nullptr);
         checkError(migraphx_load(&d->program, program_path, file_options));
         checkError(migraphx_file_options_destroy(file_options));
     }
 
-    std::vector<const VSVideoInfo *> in_vis;
+    std::vector<const VSVideoInfo*> in_vis;
     in_vis.reserve(std::size(d->nodes));
-    for (const auto & node : d->nodes) {
+    for (const auto& node : d->nodes) {
         in_vis.emplace_back(vsapi->getVideoInfo(node));
     }
 
@@ -734,7 +672,6 @@ static void VS_CC vsMIGXCreate(
     }
 
     d->out_vi = std::make_unique<VSVideoInfo>(*in_vis.front()); // mutable
-
 
     int error;
 
@@ -785,7 +722,7 @@ static void VS_CC vsMIGXCreate(
         d->flexible_output_prop = flexible_output_prop;
     }
 
-    const char * input_name[2];
+    const char* input_name[2];
     const_migraphx_shape_t input_shape;
     size_t input_size;
     {
@@ -819,7 +756,7 @@ static void VS_CC vsMIGXCreate(
         if (in_vis[0]->format.bytesPerSample != getBytesPerSample(type)) {
             return set_error("bytes per sample mismatch");
         }
-        const size_t * lengths;
+        const size_t* lengths;
         size_t ndim;
         checkError(migraphx_shape_lengths(&lengths, &ndim, input_shape));
         if (ndim != 4) {
@@ -834,20 +771,17 @@ static void VS_CC vsMIGXCreate(
         // TODO: select
         if (lengths[2] != tile_h || lengths[3] != tile_w) {
             return set_error(
-                "invalid tile size, must be " +
-                std::to_string(lengths[3]) + 'x' + std::to_string(lengths[2])
+                "invalid tile size, must be " + std::to_string(lengths[3]) + 'x' + std::to_string(lengths[2])
             );
         }
-        const size_t * strides;
+        const size_t* strides;
         checkError(migraphx_shape_strides(&strides, &ndim, input_shape));
         {
             size_t target = 1; // MIGX uses elements to measure strides
             for (int i = static_cast<int>(ndim) - 1; i >= 0; i--) {
                 if (lengths[i] > 1 && strides[i] != target) {
                     return set_error(
-                        "invalid stride for NCHW, expects " +
-                        std::to_string(target) +
-                        " instead of " +
+                        "invalid stride for NCHW, expects " + std::to_string(target) + " instead of " +
                         std::to_string(strides[i])
                     );
                 }
@@ -887,7 +821,7 @@ static void VS_CC vsMIGXCreate(
             return set_error("output type must be float or half");
         }
         bitsPerSample = type == migraphx_shape_float_type ? 32 : 16;
-        const size_t * lengths;
+        const size_t* lengths;
         size_t ndim;
         checkError(migraphx_shape_lengths(&lengths, &ndim, output_shape));
         if (ndim != 4) {
@@ -902,16 +836,14 @@ static void VS_CC vsMIGXCreate(
         if (lengths[2] % tile_h != 0 && lengths[3] % tile_w != 0) {
             return set_error("output dimensions should be integer multiple of input dimensions");
         }
-        const size_t * strides;
+        const size_t* strides;
         checkError(migraphx_shape_strides(&strides, &ndim, output_shape));
         {
             size_t target = 1; // MIGX uses elements to measure strides
             for (int i = static_cast<int>(ndim) - 1; i >= 0; i--) {
                 if (lengths[i] > 1 && strides[i] != target) {
                     return set_error(
-                        "invalid stride for NCHW, expects " +
-                        std::to_string(target) +
-                        " instead of " +
+                        "invalid stride for NCHW, expects " + std::to_string(target) + " instead of " +
                         std::to_string(strides[i])
                     );
                 }
@@ -933,13 +865,7 @@ static void VS_CC vsMIGXCreate(
     }
 
     setDimensions(
-        d->out_vi,
-        d->src_tile_shape,
-        d->dst_tile_shape,
-        bitsPerSample,
-        core,
-        vsapi,
-        !d->flexible_output_prop.empty()
+        d->out_vi, d->src_tile_shape, d->dst_tile_shape, bitsPerSample, core, vsapi, !d->flexible_output_prop.empty()
     );
 
     // per-stream context
@@ -948,11 +874,9 @@ static void VS_CC vsMIGXCreate(
         InferenceInstance instance;
 
         checkHIPError(hipMalloc(&instance.src.d_data.data, input_size));
-        checkHIPError(hipHostMalloc(
-            &instance.src.h_data.data,
-            input_size,
-            hipHostMallocWriteCombined | hipHostMallocNonCoherent
-        ));
+        checkHIPError(
+            hipHostMalloc(&instance.src.h_data.data, input_size, hipHostMallocWriteCombined | hipHostMallocNonCoherent)
+        );
         instance.src.size = input_size;
 
         checkHIPError(hipMalloc(&instance.dst.d_data.data, output_size));
@@ -982,12 +906,12 @@ static void VS_CC vsMIGXCreate(
 
     std::vector<VSFilterDependency> deps;
     deps.reserve(d->nodes.size());
-    for (auto *node : d->nodes) {
+    for (auto* node : d->nodes) {
         deps.push_back({node, rpGeneral});
     }
 
-    auto *out_vi = d->out_vi.get();
-    auto *instance_data = d.release();
+    auto* out_vi = d->out_vi.get();
+    auto* instance_data = d.release();
 
     vsapi->createVideoFilter(
         out,
@@ -1003,11 +927,8 @@ static void VS_CC vsMIGXCreate(
     );
 }
 
-
-VS_EXTERNAL_API(void) VapourSynthPluginInit2(
-    VSPlugin *plugin,
-    const VSPLUGINAPI *vspapi
-) {
+VS_EXTERNAL_API(void)
+VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI* vspapi) {
     vspapi->configPlugin(
         PLUGIN_ID,
         "migx",
@@ -1033,27 +954,25 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
         plugin
     );
 
-    auto getVersion = [](const VSMap *, VSMap * out, void *, VSCore * core, const VSAPI *vsapi) {
+    auto getVersion = [](const VSMap*, VSMap* out, void*, VSCore* core, const VSAPI* vsapi) {
         vsapi->mapSetData(out, "version", PLUGIN_VERSION_STRING, -1, dtUtf8, maReplace);
 
 #ifndef NO_MIGX_VERSION
         vsapi->mapSetData(
-            out, "migraphx_version_build",
-            (std::to_string(MIGRAPHX_VERSION_MAJOR) +
-             "." +
-             std::to_string(MIGRAPHX_VERSION_MINOR) +
-             "." +
-             std::to_string(MIGRAPHX_VERSION_PATCH)
-            ).c_str(), -1, dtUtf8, maReplace
+            out,
+            "migraphx_version_build",
+            (std::to_string(MIGRAPHX_VERSION_MAJOR) + "." + std::to_string(MIGRAPHX_VERSION_MINOR) + "." +
+             std::to_string(MIGRAPHX_VERSION_PATCH))
+                .c_str(),
+            -1,
+            dtUtf8,
+            maReplace
         );
 #endif // NO_MIGX_VERSION
 
         int runtime_version;
-        (void) hipRuntimeGetVersion(&runtime_version);
-        vsapi->mapSetData(
-            out, "hip_runtime_version",
-            std::to_string(runtime_version).c_str(), -1, dtUtf8, maReplace
-        );
+        (void)hipRuntimeGetVersion(&runtime_version);
+        vsapi->mapSetData(out, "hip_runtime_version", std::to_string(runtime_version).c_str(), -1, dtUtf8, maReplace);
 
         vsapi->mapSetInt(out, "hip_runtime_version_build", HIP_VERSION, maReplace);
 

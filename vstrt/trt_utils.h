@@ -1,21 +1,19 @@
 #ifndef VSTRT_TRT_UTILS_H_
 #define VSTRT_TRT_UTILS_H_
 
+#include "cuda_helper.h"
+#include "cuda_utils.h"
+
+#include <NvInferRuntime.h>
+#include <VapourSynth4.h>
 #include <array>
 #include <cstdint>
-#include <memory>
+#include <cuda_runtime.h>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <string>
 #include <variant>
-
-#include <cuda_runtime.h>
-#include <NvInferRuntime.h>
-
-#include <VapourSynth4.h>
-
-#include "cuda_helper.h"
-#include "cuda_utils.h"
 
 using ErrorMessage = std::string;
 
@@ -44,7 +42,7 @@ struct InferenceInstance {
     std::array<EventResource, kNumBuffers> d2h_done;
     std::unique_ptr<nvinfer1::IExecutionContext> exec_context;
     std::array<GraphExecResource, kNumBuffers> graphexec;
-    Resource<uint8_t *, cudaFree> d_context_allocation;
+    Resource<uint8_t*, cudaFree> d_context_allocation;
 };
 
 class Logger : public nvinfer1::ILogger {
@@ -53,19 +51,19 @@ class Logger : public nvinfer1::ILogger {
             if (vsapi && core) {
                 int msgType;
                 switch (severity) {
-                    case Severity::kINTERNAL_ERROR:
-                    case Severity::kERROR:
-                        msgType = mtCritical;
-                        break;
-                    case Severity::kWARNING:
-                        msgType = mtWarning;
-                        break;
-                    case Severity::kINFO:
-                        msgType = mtInformation;
-                        break;
-                    default: // kVERBOSE
-                        msgType = mtDebug;
-                        break;
+                case Severity::kINTERNAL_ERROR:
+                case Severity::kERROR:
+                    msgType = mtCritical;
+                    break;
+                case Severity::kWARNING:
+                    msgType = mtWarning;
+                    break;
+                case Severity::kINFO:
+                    msgType = mtInformation;
+                    break;
+                default: // kVERBOSE
+                    msgType = mtDebug;
+                    break;
                 }
                 vsapi->logMessage(msgType, message, core);
             } else {
@@ -74,28 +72,25 @@ class Logger : public nvinfer1::ILogger {
         }
     }
 
-public:
+  public:
     Logger() = default;
 
-    void set_verbosity(Severity value) noexcept {
-        this->verbosity = value;
-    }
+    void set_verbosity(Severity value) noexcept { this->verbosity = value; }
 
-    void set_vs_api(const VSAPI *api, VSCore *c) noexcept {
+    void set_vs_api(const VSAPI* api, VSCore* c) noexcept {
         this->vsapi = api;
         this->core = c;
     }
 
-private:
+  private:
     Severity verbosity;
-    const VSAPI *vsapi = nullptr;
-    VSCore *core = nullptr;
+    const VSAPI* vsapi = nullptr;
+    VSCore* core = nullptr;
 };
 
-static inline
-std::optional<int> selectProfile(
-    const std::unique_ptr<nvinfer1::ICudaEngine> & engine,
-    const TileSize & tile_size,
+static inline std::optional<int> selectProfile(
+    const std::unique_ptr<nvinfer1::ICudaEngine>& engine,
+    const TileSize& tile_size,
     int batch_size = 1
 ) noexcept {
 
@@ -112,9 +107,7 @@ std::optional<int> selectProfile(
 
     // finds the optimal profile
     for (int i = 0; i < engine->getNbOptimizationProfiles(); ++i) {
-        nvinfer1::Dims opt_dims = engine->getProfileShape(
-            input_name, i, nvinfer1::OptProfileSelector::kOPT
-        );
+        nvinfer1::Dims opt_dims = engine->getProfileShape(input_name, i, nvinfer1::OptProfileSelector::kOPT);
 
         if (opt_dims.d[0] != batch_size) {
             continue;
@@ -126,9 +119,7 @@ std::optional<int> selectProfile(
 
     // finds the first eligible profile
     for (int i = 0; i < engine->getNbOptimizationProfiles(); ++i) {
-        nvinfer1::Dims min_dims = engine->getProfileShape(
-            input_name, i, nvinfer1::OptProfileSelector::kMIN
-        );
+        nvinfer1::Dims min_dims = engine->getProfileShape(input_name, i, nvinfer1::OptProfileSelector::kMIN);
 
         if (min_dims.d[0] > batch_size) {
             continue;
@@ -137,9 +128,7 @@ std::optional<int> selectProfile(
             continue;
         }
 
-        nvinfer1::Dims max_dims = engine->getProfileShape(
-            input_name, i, nvinfer1::OptProfileSelector::kMAX
-        );
+        nvinfer1::Dims max_dims = engine->getProfileShape(input_name, i, nvinfer1::OptProfileSelector::kMAX);
 
         if (max_dims.d[0] < batch_size) {
             continue;
@@ -155,17 +144,14 @@ std::optional<int> selectProfile(
     return {};
 }
 
-static inline
-std::optional<ErrorMessage> enqueueCompute(
-    const MemoryResource & src,
-    const MemoryResource & dst,
-    const std::unique_ptr<nvinfer1::IExecutionContext> & exec_context,
+static inline std::optional<ErrorMessage> enqueueCompute(
+    const MemoryResource& src,
+    const MemoryResource& dst,
+    const std::unique_ptr<nvinfer1::IExecutionContext>& exec_context,
     cudaStream_t stream
 ) noexcept {
 
-    const auto set_error = [](const ErrorMessage & message) {
-        return message;
-    };
+    const auto set_error = [](const ErrorMessage& message) { return message; };
 
     auto input_name = exec_context->getEngine().getIOTensorName(0);
     auto output_name = exec_context->getEngine().getIOTensorName(1);
@@ -183,16 +169,14 @@ std::optional<ErrorMessage> enqueueCompute(
     return {};
 }
 
-static inline
-std::variant<ErrorMessage, GraphExecResource> getGraphExec(
-    const MemoryResource & src, const MemoryResource & dst,
-    const std::unique_ptr<nvinfer1::IExecutionContext> & exec_context,
+static inline std::variant<ErrorMessage, GraphExecResource> getGraphExec(
+    const MemoryResource& src,
+    const MemoryResource& dst,
+    const std::unique_ptr<nvinfer1::IExecutionContext>& exec_context,
     cudaStream_t stream
 ) noexcept {
 
-    const auto set_error = [](const ErrorMessage & message) {
-        return message;
-    };
+    const auto set_error = [](const ErrorMessage& message) { return message; };
 
     auto input_name = exec_context->getEngine().getIOTensorName(0);
     auto output_name = exec_context->getEngine().getIOTensorName(1);
@@ -228,10 +212,7 @@ std::variant<ErrorMessage, GraphExecResource> getGraphExec(
     return graphexec;
 }
 
-static inline
-size_t getSize(
-    const nvinfer1::Dims & dim
-) noexcept {
+static inline size_t getSize(const nvinfer1::Dims& dim) noexcept {
 
     size_t ret = 1;
     for (int i = 0; i < dim.nbDims; ++i) {
@@ -240,70 +221,63 @@ size_t getSize(
     return ret;
 }
 
-static inline
-int getBytesPerSample(nvinfer1::DataType type) noexcept {
+static inline int getBytesPerSample(nvinfer1::DataType type) noexcept {
     switch (type) {
-        case nvinfer1::DataType::kFLOAT:
-            return 4;
-        case nvinfer1::DataType::kHALF:
-            return 2;
-        case nvinfer1::DataType::kINT8:
-            return 1;
-        case nvinfer1::DataType::kINT32:
-            return 4;
-        case nvinfer1::DataType::kBOOL:
-            return 1;
-        case nvinfer1::DataType::kUINT8:
-            return 1;
-        case nvinfer1::DataType::kFP8:
-            return 1;
-        case nvinfer1::DataType::kBF16:
-            return 2;
-        case nvinfer1::DataType::kINT64:
-            return 8;
-        default:
-            return 0;
+    case nvinfer1::DataType::kFLOAT:
+        return 4;
+    case nvinfer1::DataType::kHALF:
+        return 2;
+    case nvinfer1::DataType::kINT8:
+        return 1;
+    case nvinfer1::DataType::kINT32:
+        return 4;
+    case nvinfer1::DataType::kBOOL:
+        return 1;
+    case nvinfer1::DataType::kUINT8:
+        return 1;
+    case nvinfer1::DataType::kFP8:
+        return 1;
+    case nvinfer1::DataType::kBF16:
+        return 2;
+    case nvinfer1::DataType::kINT64:
+        return 8;
+    default:
+        return 0;
     }
 }
 
-static inline
-std::variant<ErrorMessage, InferenceInstance> getInstance(
-    const std::unique_ptr<nvinfer1::ICudaEngine> & engine,
-    const std::optional<int> & profile_index,
-    const TileSize & tile_size,
+static inline std::variant<ErrorMessage, InferenceInstance> getInstance(
+    const std::unique_ptr<nvinfer1::ICudaEngine>& engine,
+    const std::optional<int>& profile_index,
+    const TileSize& tile_size,
     bool use_cuda_graph,
     bool is_dynamic
 ) noexcept {
 
-    const auto set_error = [](const ErrorMessage & error_message) {
-        return error_message;
-    };
+    const auto set_error = [](const ErrorMessage& error_message) { return error_message; };
 
-    StreamResource stream {};
+    StreamResource stream{};
     checkError(cudaStreamCreateWithFlags(&stream.data, cudaStreamNonBlocking));
 
-    StreamResource h2d_stream {};
+    StreamResource h2d_stream{};
     checkError(cudaStreamCreateWithFlags(&h2d_stream.data, cudaStreamNonBlocking));
 
-    StreamResource d2h_stream {};
+    StreamResource d2h_stream{};
     checkError(cudaStreamCreateWithFlags(&d2h_stream.data, cudaStreamNonBlocking));
 
-    std::array<EventResource, kNumBuffers> h2d_done {};
-    std::array<EventResource, kNumBuffers> compute_done {};
-    std::array<EventResource, kNumBuffers> d2h_done {};
+    std::array<EventResource, kNumBuffers> h2d_done{};
+    std::array<EventResource, kNumBuffers> compute_done{};
+    std::array<EventResource, kNumBuffers> d2h_done{};
     for (size_t b = 0; b < kNumBuffers; ++b) {
         checkError(cudaEventCreateWithFlags(&h2d_done[b].data, cudaEventDisableTiming));
         checkError(cudaEventCreateWithFlags(&compute_done[b].data, cudaEventDisableTiming));
         checkError(cudaEventCreateWithFlags(&d2h_done[b].data, cudaEventDisableTiming));
     }
 
-    auto exec_context = std::unique_ptr<nvinfer1::IExecutionContext>(
-        engine->createExecutionContext(
-            is_dynamic ?
-            nvinfer1::ExecutionContextAllocationStrategy::kUSER_MANAGED :
-            nvinfer1::ExecutionContextAllocationStrategy::kON_PROFILE_CHANGE
-        )
-    );
+    auto exec_context = std::unique_ptr<nvinfer1::IExecutionContext>(engine->createExecutionContext(
+        is_dynamic ? nvinfer1::ExecutionContextAllocationStrategy::kUSER_MANAGED
+                   : nvinfer1::ExecutionContextAllocationStrategy::kON_PROFILE_CHANGE
+    ));
 
     auto input_name = engine->getIOTensorName(0);
     auto output_name = engine->getIOTensorName(1);
@@ -332,20 +306,18 @@ std::variant<ErrorMessage, InferenceInstance> getInstance(
 
         if (std::holds_alternative<RequestedTileSize>(tile_size)) {
             if (dims.d[2] != std::get<RequestedTileSize>(tile_size).tile_h ||
-                dims.d[3] != std::get<RequestedTileSize>(tile_size).tile_w
-            ) {
+                dims.d[3] != std::get<RequestedTileSize>(tile_size).tile_w) {
                 return set_error("requested tile size not applicable");
             }
         } else {
             if (dims.d[2] != std::get<VideoSize>(tile_size).height ||
-                dims.d[3] != std::get<VideoSize>(tile_size).width
-            ) {
+                dims.d[3] != std::get<VideoSize>(tile_size).width) {
                 return set_error("not supported video dimensions");
             }
         }
     }
 
-    std::array<MemoryResource, kNumBuffers> src {};
+    std::array<MemoryResource, kNumBuffers> src{};
     {
         auto dim = exec_context->getTensorShape(input_name);
         auto type = engine->getTensorDataType(input_name);
@@ -353,21 +325,17 @@ std::variant<ErrorMessage, InferenceInstance> getInstance(
         auto size = getSize(dim) * getBytesPerSample(type);
 
         for (size_t b = 0; b < kNumBuffers; ++b) {
-            Resource<uint8_t *, cudaFree> d_data {};
+            Resource<uint8_t*, cudaFree> d_data{};
             checkError(cudaMalloc(&d_data.data, size));
 
-            Resource<uint8_t *, cudaFreeHost> h_data {};
+            Resource<uint8_t*, cudaFreeHost> h_data{};
             checkError(cudaMallocHost(&h_data.data, size, cudaHostAllocWriteCombined));
 
-            src[b] = MemoryResource{
-                .h_data = std::move(h_data),
-                .d_data = std::move(d_data),
-                .size=size
-            };
+            src[b] = MemoryResource{.h_data = std::move(h_data), .d_data = std::move(d_data), .size = size};
         }
     }
 
-    std::array<MemoryResource, kNumBuffers> dst {};
+    std::array<MemoryResource, kNumBuffers> dst{};
     {
         auto dim = exec_context->getTensorShape(output_name);
         auto type = engine->getTensorDataType(output_name);
@@ -375,24 +343,20 @@ std::variant<ErrorMessage, InferenceInstance> getInstance(
         auto size = getSize(dim) * getBytesPerSample(type);
 
         for (size_t b = 0; b < kNumBuffers; ++b) {
-            Resource<uint8_t *, cudaFree> d_data {};
+            Resource<uint8_t*, cudaFree> d_data{};
             checkError(cudaMalloc(&d_data.data, size));
 
-            Resource<uint8_t *, cudaFreeHost> h_data {};
+            Resource<uint8_t*, cudaFreeHost> h_data{};
             checkError(cudaMallocHost(&h_data.data, size));
 
-            dst[b] = MemoryResource{
-                .h_data = std::move(h_data),
-                .d_data = std::move(d_data),
-                .size=size
-            };
+            dst[b] = MemoryResource{.h_data = std::move(h_data), .d_data = std::move(d_data), .size = size};
         }
     }
 
-    Resource<uint8_t *, cudaFree> d_context_allocation {};
+    Resource<uint8_t*, cudaFree> d_context_allocation{};
 
     if (is_dynamic) {
-        size_t buffer_size { exec_context->updateDeviceMemorySizeForShapes() };
+        size_t buffer_size{exec_context->updateDeviceMemorySizeForShapes()};
         if (buffer_size == 0) {
             return set_error("failed to get internal activation buffer size");
         }
@@ -401,13 +365,10 @@ std::variant<ErrorMessage, InferenceInstance> getInstance(
         exec_context->setDeviceMemoryV2(d_context_allocation.data, static_cast<int64_t>(buffer_size));
     }
 
-    std::array<GraphExecResource, kNumBuffers> graphexec {};
+    std::array<GraphExecResource, kNumBuffers> graphexec{};
     if (use_cuda_graph) {
         for (size_t b = 0; b < kNumBuffers; ++b) {
-            auto result = getGraphExec(
-                src[b], dst[b],
-                exec_context, stream
-            );
+            auto result = getGraphExec(src[b], dst[b], exec_context, stream);
             if (std::holds_alternative<GraphExecResource>(result)) {
                 graphexec[b] = std::move(std::get<GraphExecResource>(result));
             } else {
@@ -431,11 +392,8 @@ std::variant<ErrorMessage, InferenceInstance> getInstance(
     };
 }
 
-static inline
-std::optional<ErrorMessage> checkEngine(
-    const std::unique_ptr<nvinfer1::ICudaEngine> & engine,
-    bool flexible_output
-) noexcept {
+static inline std::optional<ErrorMessage>
+checkEngine(const std::unique_ptr<nvinfer1::ICudaEngine>& engine, bool flexible_output) noexcept {
 
     int num_bindings = engine->getNbIOTensors();
 
@@ -450,7 +408,7 @@ std::optional<ErrorMessage> checkEngine(
         return "the first binding should be an input binding";
     }
 
-    const nvinfer1::Dims & input_dims = engine->getTensorShape(input_name);
+    const nvinfer1::Dims& input_dims = engine->getTensorShape(input_name);
 
     if (input_dims.nbDims != 4) {
         return "expects network with 4-D input";
@@ -463,7 +421,7 @@ std::optional<ErrorMessage> checkEngine(
         return "the second binding should be an output binding";
     }
 
-    const nvinfer1::Dims & output_dims = engine->getTensorShape(output_name);
+    const nvinfer1::Dims& output_dims = engine->getTensorShape(output_name);
 
     if (output_dims.nbDims != 4) {
         return "expects network with 4-D output";
@@ -485,9 +443,9 @@ std::optional<ErrorMessage> checkEngine(
         return "output dimensions must be divisible by input dimensions";
     }
 
-    for (const auto & name : { input_name, output_name }) {
+    for (const auto& name : {input_name, output_name}) {
         if (engine->getTensorLocation(name) != nvinfer1::TensorLocation::kDEVICE) {
-            return "network binding " + std::string{ name } + " should reside on device";
+            return "network binding " + std::string{name} + " should reside on device";
         }
 
         if (engine->getTensorFormat(name) != nvinfer1::TensorFormat::kLINEAR) {
@@ -498,20 +456,16 @@ std::optional<ErrorMessage> checkEngine(
     return {};
 }
 
-static inline
-std::variant<ErrorMessage, std::unique_ptr<nvinfer1::ICudaEngine>> initEngine(
-    const char * engine_data, size_t engine_nbytes,
-    const std::unique_ptr<nvinfer1::IRuntime> & runtime,
+static inline std::variant<ErrorMessage, std::unique_ptr<nvinfer1::ICudaEngine>> initEngine(
+    const char* engine_data,
+    size_t engine_nbytes,
+    const std::unique_ptr<nvinfer1::IRuntime>& runtime,
     bool flexible_output
 ) noexcept {
 
-    const auto set_error = [](const ErrorMessage & error_message) {
-        return error_message;
-    };
+    const auto set_error = [](const ErrorMessage& error_message) { return error_message; };
 
-    std::unique_ptr<nvinfer1::ICudaEngine> engine {
-        runtime->deserializeCudaEngine(engine_data, engine_nbytes)
-    };
+    std::unique_ptr<nvinfer1::ICudaEngine> engine{runtime->deserializeCudaEngine(engine_data, engine_nbytes)};
 
     if (!engine) {
         return set_error("engine deserialization failed");
@@ -525,22 +479,21 @@ std::variant<ErrorMessage, std::unique_ptr<nvinfer1::ICudaEngine>> initEngine(
 }
 
 // 0: integer, 1: float
-static inline
-int getSampleType(nvinfer1::DataType type) noexcept {
+static inline int getSampleType(nvinfer1::DataType type) noexcept {
     switch (type) {
-        case nvinfer1::DataType::kFLOAT:
-        case nvinfer1::DataType::kHALF:
-        case nvinfer1::DataType::kFP8:
-        case nvinfer1::DataType::kBF16:
-            return 1;
-        case nvinfer1::DataType::kINT8:
-        case nvinfer1::DataType::kINT32:
-        case nvinfer1::DataType::kBOOL:
-        case nvinfer1::DataType::kUINT8:
-        case nvinfer1::DataType::kINT64:
-            return 0;
-        default:
-            return -1;
+    case nvinfer1::DataType::kFLOAT:
+    case nvinfer1::DataType::kHALF:
+    case nvinfer1::DataType::kFP8:
+    case nvinfer1::DataType::kBF16:
+        return 1;
+    case nvinfer1::DataType::kINT8:
+    case nvinfer1::DataType::kINT32:
+    case nvinfer1::DataType::kBOOL:
+    case nvinfer1::DataType::kUINT8:
+    case nvinfer1::DataType::kINT64:
+        return 0;
+    default:
+        return -1;
     }
 }
 

@@ -16,18 +16,17 @@
 #include <thread>
 #endif
 
-#include <VapourSynth4.h>
-#include <VSHelper4.h>
 #include <VSConstants4.h>
+#include <VSHelper4.h>
+#include <VapourSynth4.h>
 
 // ncnn
-#include <net.h>
-#include <gpu.h>
-
-#include <onnx/common/version.h>
-
 #include "../common/onnx_utils.h"
 #include "onnx2ncnn.hpp"
+
+#include <gpu.h>
+#include <net.h>
+#include <onnx/common/version.h>
 
 #ifndef PLUGIN_VERSION_MAJOR
 #define PLUGIN_VERSION_MAJOR 1
@@ -39,20 +38,16 @@
 #define PLUGIN_VERSION_STRING "unknown"
 #endif
 
-
 #define PLUGIN_ID "io.github.amusementclub.vs_ncnn"
 
-
 [[nodiscard]]
-static std::optional<std::string> checkNodes(
-    const std::vector<const VSVideoInfo *> & vis
-) noexcept {
+static std::optional<std::string> checkNodes(const std::vector<const VSVideoInfo*>& vis) noexcept {
 
-    for (const auto & vi : vis) {
+    for (const auto& vi : vis) {
         if (vi->format.sampleType != stFloat) {
             return "expects clip with floating-point type";
         }
-        
+
         if (vi->format.bitsPerSample != 32 && vi->format.bitsPerSample != 16) {
             return "expects clip with type fp32 or fp16";
         }
@@ -74,19 +69,19 @@ static std::optional<std::string> checkNodes(
 }
 
 struct TicketSemaphore {
-    std::atomic<intptr_t> ticket {};
-    std::atomic<intptr_t> current {};
+    std::atomic<intptr_t> ticket{};
+    std::atomic<intptr_t> current{};
 
     void acquire() noexcept {
-        intptr_t tk { ticket.fetch_add(1, std::memory_order_acquire) };
+        intptr_t tk{ticket.fetch_add(1, std::memory_order_acquire)};
         while (true) {
-            intptr_t curr { current.load(std::memory_order_acquire) };
+            intptr_t curr{current.load(std::memory_order_acquire)};
             if (tk <= curr) {
                 return;
             }
 #if __cpp_lib_atomic_wait
             current.wait(curr, std::memory_order::relaxed);
-#else // __cpp_lib_atomic_wait
+#else  // __cpp_lib_atomic_wait
             using namespace std::chrono_literals;
             std::this_thread::sleep_for(10ms);
 #endif // __cpp_lib_atomic_wait
@@ -104,8 +99,8 @@ struct TicketSemaphore {
 // per-stream context
 struct Resource {
     std::unique_ptr<ncnn::VkCompute> cmd;
-    ncnn::VkAllocator * blob_vkallocator;
-    ncnn::VkAllocator * staging_vkallocator;
+    ncnn::VkAllocator* blob_vkallocator;
+    ncnn::VkAllocator* staging_vkallocator;
     ncnn::Mat h_src_fp32;
     ncnn::Mat h_src;
     ncnn::VkMat d_src;
@@ -114,10 +109,10 @@ struct Resource {
     ncnn::Mat h_dst_fp32;
 };
 
-static std::atomic<int> num_plugin_instances {};
+static std::atomic<int> num_plugin_instances{};
 
 struct vsNcnnData {
-    std::vector<VSNode *> nodes;
+    std::vector<VSNode*> nodes;
     std::unique_ptr<VSVideoInfo> out_vi;
 
     int overlap_w, overlap_h;
@@ -133,7 +128,7 @@ struct vsNcnnData {
     std::mutex ticket_lock;
     TicketSemaphore semaphore;
 
-    ncnn::VulkanDevice * device; // ncnn caches device allocations in a global variable
+    ncnn::VulkanDevice* device; // ncnn caches device allocations in a global variable
     ncnn::Net net;
     int input_index;
     int output_index;
@@ -159,35 +154,34 @@ struct vsNcnnData {
     }
 };
 
-
-static const VSFrame *VS_CC vsNcnnGetFrame(
+static const VSFrame* VS_CC vsNcnnGetFrame(
     int n,
     int activationReason,
-    void *instanceData,
-    void **frameData,
-    VSFrameContext *frameCtx,
-    VSCore *core,
-    const VSAPI *vsapi
+    void* instanceData,
+    void** frameData,
+    VSFrameContext* frameCtx,
+    VSCore* core,
+    const VSAPI* vsapi
 ) noexcept {
 
-    auto *d = static_cast<vsNcnnData *>(instanceData);
+    auto* d = static_cast<vsNcnnData*>(instanceData);
 
     if (activationReason == arInitial) {
-        for (auto *node : d->nodes) {
+        for (auto* node : d->nodes) {
             vsapi->requestFrameFilter(n, node, frameCtx);
         }
     } else if (activationReason == arAllFramesReady) {
-        std::vector<const VSVideoInfo *> in_vis;
+        std::vector<const VSVideoInfo*> in_vis;
         in_vis.reserve(d->nodes.size());
-        for (auto *node : d->nodes) {
+        for (auto* node : d->nodes) {
             in_vis.emplace_back(vsapi->getVideoInfo(node));
         }
 
         const auto fp16_input = in_vis[0]->format.bitsPerSample == 16;
 
-        std::vector<const VSFrame *> src_frames;
+        std::vector<const VSFrame*> src_frames;
         src_frames.reserve(d->nodes.size());
-        for (auto *node : d->nodes) {
+        for (auto* node : d->nodes) {
             src_frames.emplace_back(vsapi->getFrameFilter(n, node, frameCtx));
         }
 
@@ -196,25 +190,23 @@ static const VSFrame *VS_CC vsNcnnGetFrame(
         auto src_height = vsapi->getFrameHeight(src_frames.front(), 0);
         auto src_bytes = vsapi->getVideoFrameFormat(src_frames.front())->bytesPerSample;
 
-        VSFrame * const dst_frame = vsapi->newVideoFrame(
-            &d->out_vi->format, d->out_vi->width, d->out_vi->height,
-            src_frames.front(), core
-        );
+        VSFrame* const dst_frame =
+            vsapi->newVideoFrame(&d->out_vi->format, d->out_vi->width, d->out_vi->height, src_frames.front(), core);
 
-        std::vector<VSFrame *> dst_frames;
+        std::vector<VSFrame*> dst_frames;
 
         auto dst_stride = vsapi->getStride(dst_frame, 0);
         auto dst_bytes = vsapi->getVideoFrameFormat(dst_frame)->bytesPerSample;
 
         auto ticket = d->acquire();
-        Resource & resource = d->resources[ticket];
+        Resource& resource = d->resources[ticket];
 
-        std::array<int64_t, 4> src_tile_shape { 1, d->in_tile_c, d->in_tile_h, d->in_tile_w };
+        std::array<int64_t, 4> src_tile_shape{1, d->in_tile_c, d->in_tile_h, d->in_tile_w};
         auto src_tile_h = src_tile_shape[2];
         auto src_tile_w = src_tile_shape[3];
         auto src_tile_w_bytes = src_tile_w * src_bytes;
 
-        std::vector<const uint8_t *> src_ptrs;
+        std::vector<const uint8_t*> src_ptrs;
         src_ptrs.reserve(src_tile_shape[1]);
         for (unsigned i = 0; i < d->nodes.size(); ++i) {
             for (int j = 0; j < in_vis[i]->format.numPlanes; ++j) {
@@ -225,23 +217,21 @@ static const VSFrame *VS_CC vsNcnnGetFrame(
         auto step_w = src_tile_w - 2 * d->overlap_w;
         auto step_h = src_tile_h - 2 * d->overlap_h;
 
-        std::array<int64_t, 4> dst_tile_shape { 1, d->out_tile_c, d->out_tile_h, d->out_tile_w };
+        std::array<int64_t, 4> dst_tile_shape{1, d->out_tile_c, d->out_tile_h, d->out_tile_w};
         auto dst_tile_h = dst_tile_shape[2];
         auto dst_tile_w = dst_tile_shape[3];
         auto dst_tile_w_bytes = dst_tile_w * dst_bytes;
         auto dst_planes = dst_tile_shape[1];
 
-        std::vector<uint8_t *> dst_ptrs;
+        std::vector<uint8_t*> dst_ptrs;
         if (d->flexible_output_prop.empty()) {
             for (int i = 0; i < dst_planes; ++i) {
                 dst_ptrs.emplace_back(vsapi->getWritePtr(dst_frame, i));
             }
         } else {
             for (int i = 0; i < dst_planes; ++i) {
-                auto *frame = vsapi->newVideoFrame(
-                    &d->out_vi->format, d->out_vi->width, d->out_vi->height,
-                    src_frames[0], core
-                );
+                auto* frame =
+                    vsapi->newVideoFrame(&d->out_vi->format, d->out_vi->width, d->out_vi->height, src_frames[0], core);
                 dst_frames.emplace_back(frame);
                 dst_ptrs.emplace_back(vsapi->getWritePtr(frame, 0));
             }
@@ -250,23 +240,20 @@ static const VSFrame *VS_CC vsNcnnGetFrame(
         auto h_scale = dst_tile_h / src_tile_h;
         auto w_scale = dst_tile_w / src_tile_w;
 
-        const auto set_error = [&](const std::string & error_message) {
+        const auto set_error = [&](const std::string& error_message) {
             using namespace std::string_literals;
 
-            vsapi->setFilterError(
-                (__func__ + ": "s + error_message).c_str(),
-                frameCtx
-            );
+            vsapi->setFilterError((__func__ + ": "s + error_message).c_str(), frameCtx);
 
             d->release(ticket);
 
-            for (const auto *frame : dst_frames) {
+            for (const auto* frame : dst_frames) {
                 vsapi->freeFrame(frame);
             }
 
             vsapi->freeFrame(dst_frame);
 
-            for (const auto *frame : src_frames) {
+            for (const auto* frame : src_frames) {
                 vsapi->freeFrame(frame);
             }
 
@@ -289,21 +276,17 @@ static const VSFrame *VS_CC vsNcnnGetFrame(
                 int x_crop_end = (x == src_width - src_tile_w) ? 0 : d->overlap_w;
 
                 {
-                    const auto & input_mat = d->fp16 && !fp16_input ? resource.h_src_fp32 : resource.h_src;
-                    auto input_buffer = reinterpret_cast<uint8_t *>(input_mat.data);
+                    const auto& input_mat = d->fp16 && !fp16_input ? resource.h_src_fp32 : resource.h_src;
+                    auto input_buffer = reinterpret_cast<uint8_t*>(input_mat.data);
 
                     // assumes the pitches of ncnn::Mat to be
                     // (cstep * elemsize, w * h * elemsize, h * elemsize)
-                    for (const auto & _src_ptr : src_ptrs) {
-                        const uint8_t * src_ptr { _src_ptr +
-                            y * src_stride + x * src_bytes
-                        };
+                    for (const auto& _src_ptr : src_ptrs) {
+                        const uint8_t* src_ptr{_src_ptr + y * src_stride + x * src_bytes};
 
                         {
                             vsh::bitblt(
-                                input_buffer, src_tile_w_bytes,
-                                src_ptr, src_stride,
-                                src_tile_w_bytes, src_tile_h
+                                input_buffer, src_tile_w_bytes, src_ptr, src_stride, src_tile_w_bytes, src_tile_h
                             );
                             input_buffer += input_mat.cstep * input_mat.elemsize;
                         }
@@ -339,13 +322,11 @@ static const VSFrame *VS_CC vsNcnnGetFrame(
                 }
 
                 {
-                    const auto & output_mat = d->fp16 && !d->fp16_output ? resource.h_dst_fp32 : resource.h_dst;
-                    auto output_buffer = reinterpret_cast<uint8_t *>(output_mat.data);
+                    const auto& output_mat = d->fp16 && !d->fp16_output ? resource.h_dst_fp32 : resource.h_dst;
+                    auto output_buffer = reinterpret_cast<uint8_t*>(output_mat.data);
 
                     for (int plane = 0; plane < dst_planes; ++plane) {
-                        auto dst_ptr = (dst_ptrs[plane] +
-                            h_scale * y * dst_stride + w_scale * x * dst_bytes
-                        );
+                        auto dst_ptr = (dst_ptrs[plane] + h_scale * y * dst_stride + w_scale * x * dst_bytes);
 
                         {
                             vsh::bitblt(
@@ -378,15 +359,15 @@ static const VSFrame *VS_CC vsNcnnGetFrame(
 
         d->release(ticket);
 
-        for (const auto *frame : src_frames) {
+        for (const auto* frame : src_frames) {
             vsapi->freeFrame(frame);
         }
 
         if (!d->flexible_output_prop.empty()) {
-            auto *prop = vsapi->getFramePropertiesRW(dst_frame);
+            auto* prop = vsapi->getFramePropertiesRW(dst_frame);
 
             for (int i = 0; i < dst_planes; i++) {
-                auto key { d->flexible_output_prop + std::to_string(i) };
+                auto key{d->flexible_output_prop + std::to_string(i)};
                 vsapi->mapSetFrame(prop, key.c_str(), dst_frames[i], maReplace);
                 vsapi->freeFrame(dst_frames[i]);
             }
@@ -398,22 +379,17 @@ static const VSFrame *VS_CC vsNcnnGetFrame(
     return nullptr;
 }
 
+static void VS_CC vsNcnnFree(void* instanceData, VSCore* core, const VSAPI* vsapi) noexcept {
 
-static void VS_CC vsNcnnFree(
-    void *instanceData,
-    VSCore *core,
-    const VSAPI *vsapi
-) noexcept {
+    auto* d = static_cast<vsNcnnData*>(instanceData);
 
-    auto *d = static_cast<vsNcnnData *>(instanceData);
-
-    for (auto *node : d->nodes) {
+    for (auto* node : d->nodes) {
         vsapi->freeNode(node);
     }
 
-    std::vector<std::pair<ncnn::VkAllocator *, ncnn::VkAllocator *>> allocators;
+    std::vector<std::pair<ncnn::VkAllocator*, ncnn::VkAllocator*>> allocators;
     allocators.reserve(d->resources.size());
-    for (const auto & resource : d->resources) {
+    for (const auto& resource : d->resources) {
         allocators.emplace_back(resource.blob_vkallocator, resource.staging_vkallocator);
     }
 
@@ -431,16 +407,9 @@ static void VS_CC vsNcnnFree(
     }
 }
 
+static void VS_CC vsNcnnCreate(const VSMap* in, VSMap* out, void* userData, VSCore* core, const VSAPI* vsapi) noexcept {
 
-static void VS_CC vsNcnnCreate(
-    const VSMap *in,
-    VSMap *out,
-    void *userData,
-    VSCore *core,
-    const VSAPI *vsapi
-) noexcept {
-
-    auto d { std::make_unique<vsNcnnData>() };
+    auto d{std::make_unique<vsNcnnData>()};
     num_plugin_instances++;
 
     int num_nodes = vsapi->mapNumElements(in, "clips");
@@ -449,10 +418,10 @@ static void VS_CC vsNcnnCreate(
         d->nodes.emplace_back(vsapi->mapGetNode(in, "clips", i, nullptr));
     }
 
-    auto set_error = [&](const std::string & error_message) {
+    auto set_error = [&](const std::string& error_message) {
         using namespace std::string_literals;
         vsapi->mapSetError(out, (__func__ + ": "s + error_message).c_str());
-        for (auto *node : d->nodes) {
+        for (auto* node : d->nodes) {
             vsapi->freeNode(node);
         }
         if (--num_plugin_instances == 0) {
@@ -460,9 +429,9 @@ static void VS_CC vsNcnnCreate(
         }
     };
 
-    std::vector<const VSVideoInfo *> in_vis;
+    std::vector<const VSVideoInfo*> in_vis;
     in_vis.reserve(d->nodes.size());
-    for (auto *node : d->nodes) {
+    for (auto* node : d->nodes) {
         in_vis.emplace_back(vsapi->getVideoInfo(node));
     }
 
@@ -574,12 +543,12 @@ static void VS_CC vsNcnnCreate(
 
     auto onnx_model = std::move(std::get<ONNX_NAMESPACE::ModelProto>(result));
     {
-        const auto & input_shape = onnx_model.graph().input(0).type().tensor_type().shape();
+        const auto& input_shape = onnx_model.graph().input(0).type().tensor_type().shape();
         d->in_tile_c = vsh::int64ToIntS(input_shape.dim(1).dim_value());
         d->in_tile_h = vsh::int64ToIntS(input_shape.dim(2).dim_value());
         d->in_tile_w = vsh::int64ToIntS(input_shape.dim(3).dim_value());
 
-        const auto & output_shape = onnx_model.graph().output(0).type().tensor_type().shape();
+        const auto& output_shape = onnx_model.graph().output(0).type().tensor_type().shape();
         d->out_tile_c = vsh::int64ToIntS(output_shape.dim(1).dim_value());
         d->out_tile_h = vsh::int64ToIntS(output_shape.dim(2).dim_value());
         d->out_tile_w = vsh::int64ToIntS(output_shape.dim(3).dim_value());
@@ -605,7 +574,7 @@ static void VS_CC vsNcnnCreate(
         return set_error("onnx2ncnn failed");
     }
 
-    const auto & [ncnn_param, ncnn_model_bin] = ncnn_result.value();
+    const auto& [ncnn_param, ncnn_model_bin] = ncnn_result.value();
 
     // ncnn related code
     if (auto device = ncnn::get_gpu_device(device_id); device != nullptr) {
@@ -641,7 +610,7 @@ static void VS_CC vsNcnnCreate(
     }
 
     d->resources.resize(num_streams);
-    for (auto & resource : d->resources) {
+    for (auto& resource : d->resources) {
         resource.cmd = std::make_unique<ncnn::VkCompute>(d->device);
         resource.blob_vkallocator = d->device->acquire_blob_allocator();
         resource.staging_vkallocator = d->device->acquire_staging_allocator();
@@ -665,12 +634,12 @@ static void VS_CC vsNcnnCreate(
 
     std::vector<VSFilterDependency> deps;
     deps.reserve(d->nodes.size());
-    for (auto *node : d->nodes) {
+    for (auto* node : d->nodes) {
         deps.push_back({node, rpGeneral});
     }
 
-    auto *out_vi = d->out_vi.get();
-    auto *instance_data = d.release();
+    auto* out_vi = d->out_vi.get();
+    auto* instance_data = d.release();
 
     vsapi->createVideoFilter(
         out,
@@ -686,11 +655,7 @@ static void VS_CC vsNcnnCreate(
     );
 }
 
-
-static inline void VS_CC getDeviceProp(
-    const VSMap *in, VSMap *out, void *userData,
-    VSCore *core, const VSAPI *vsapi
-) {
+static inline void VS_CC getDeviceProp(const VSMap* in, VSMap* out, void* userData, VSCore* core, const VSAPI* vsapi) {
 
     int err;
     int device_id = vsapi->mapGetIntSaturated(in, "device_id", 0, &err);
@@ -698,20 +663,20 @@ static inline void VS_CC getDeviceProp(
         device_id = 0;
     }
 
-    ncnn::VulkanDevice * device = ncnn::get_gpu_device(device_id);
+    ncnn::VulkanDevice* device = ncnn::get_gpu_device(device_id);
     if (device == nullptr) {
         vsapi->mapSetError(out, "get_gpu_device failed");
-        return ;
+        return;
     }
-    const auto & info = device->info;
+    const auto& info = device->info;
 
-    auto setProp = [&](const char * name, auto value, int data_length = -1) {
+    auto setProp = [&](const char* name, auto value, int data_length = -1) {
         using T = std::decay_t<decltype(value)>;
         if constexpr (std::is_integral_v<T>) {
             vsapi->mapSetInt(out, name, static_cast<int64_t>(value), maReplace);
         } else if constexpr (std::is_floating_point_v<T>) {
             vsapi->mapSetFloat(out, name, value, maReplace);
-        } else if constexpr (std::is_same_v<T, const char *>) {
+        } else if constexpr (std::is_same_v<T, const char*>) {
             vsapi->mapSetData(out, name, value, data_length, dtUtf8, maReplace);
         }
     };
@@ -784,11 +749,8 @@ static inline void VS_CC getDeviceProp(
     setProp("support_VK_NV_cooperative_matrix()", info.support_VK_NV_cooperative_matrix());
 };
 
-
-VS_EXTERNAL_API(void) VapourSynthPluginInit2(
-    VSPlugin *plugin,
-    const VSPLUGINAPI *vspapi
-) {
+VS_EXTERNAL_API(void)
+VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI* vspapi) {
     vspapi->configPlugin(
         PLUGIN_ID,
         "ncnn",
@@ -817,7 +779,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
         plugin
     );
 
-    auto getVersion = [](const VSMap *, VSMap * out, void *, VSCore * core, const VSAPI *vsapi) {
+    auto getVersion = [](const VSMap*, VSMap* out, void*, VSCore* core, const VSAPI* vsapi) {
         vsapi->mapSetData(out, "version", PLUGIN_VERSION_STRING, -1, dtUtf8, maReplace);
         vsapi->mapSetData(out, "onnx_version", ONNX_NAMESPACE::LAST_RELEASE_VERSION, -1, dtUtf8, maReplace);
         vsapi->mapSetData(out, "ncnn_version", NCNN_VERSION_STRING, -1, dtUtf8, maReplace);

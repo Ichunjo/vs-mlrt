@@ -1,16 +1,15 @@
 #ifndef VSTRT_INFERENCE_HELPER_H_
 #define VSTRT_INFERENCE_HELPER_H_
 
+#include "cuda_helper.h"
+#include "trt_utils.h"
+
+#include <VSHelper4.h>
 #include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
-
-#include <VSHelper4.h>
-
-#include "cuda_helper.h"
-#include "trt_utils.h"
 
 struct InputInfo {
     int width;
@@ -35,19 +34,16 @@ struct IOInfo {
     int overlap_h;
 };
 
-static inline
-std::optional<ErrorMessage> inference(
-    const InferenceInstance & instance,
+static inline std::optional<ErrorMessage> inference(
+    const InferenceInstance& instance,
     int device_id,
-    bool use_cuda_graph, 
-    const IOInfo & info,
-    const std::vector<const uint8_t *> & src_ptrs,
-    const std::vector<uint8_t *> & dst_ptrs
+    bool use_cuda_graph,
+    const IOInfo& info,
+    const std::vector<const uint8_t*>& src_ptrs,
+    const std::vector<uint8_t*>& dst_ptrs
 ) noexcept {
 
-    const auto set_error = [](const ErrorMessage & error_message) {
-        return error_message;
-    };
+    const auto set_error = [](const ErrorMessage& error_message) { return error_message; };
 
     checkError(cudaSetDevice(device_id));
 
@@ -81,7 +77,7 @@ std::optional<ErrorMessage> inference(
             int x_crop_start = (x == 0) ? 0 : info.overlap_w;
             int x_crop_end = (x == info.in.width - info.in.tile_w) ? 0 : info.overlap_w;
 
-            tiles.push_back(TileDesc{ x, y, x_crop_start, x_crop_end, y_crop_start, y_crop_end });
+            tiles.push_back(TileDesc{x, y, x_crop_start, x_crop_end, y_crop_start, y_crop_end});
 
             if (x + info.in.tile_w == info.in.width) {
                 break;
@@ -100,16 +96,16 @@ std::optional<ErrorMessage> inference(
     }
 
     auto pack_tile = [&](size_t tile_idx, int b) -> void {
-        const auto & tile = tiles[tile_idx];
-        uint8_t * h_data = instance.src[b].h_data.data;
-        for (const uint8_t * _src_ptr : src_ptrs) {
-            const uint8_t * src_ptr { _src_ptr +
-                tile.y * info.in.pitch + tile.x * info.in.bytes_per_sample
-            };
+        const auto& tile = tiles[tile_idx];
+        uint8_t* h_data = instance.src[b].h_data.data;
+        for (const uint8_t* _src_ptr : src_ptrs) {
+            const uint8_t* src_ptr{_src_ptr + tile.y * info.in.pitch + tile.x * info.in.bytes_per_sample};
 
             vsh::bitblt(
-                h_data, src_tile_w_bytes,
-                src_ptr, info.in.pitch,
+                h_data,
+                src_tile_w_bytes,
+                src_ptr,
+                info.in.pitch,
                 static_cast<size_t>(src_tile_w_bytes),
                 static_cast<size_t>(info.in.tile_h)
             );
@@ -121,8 +117,11 @@ std::optional<ErrorMessage> inference(
     auto launch_tile = [&](int b) -> std::optional<ErrorMessage> {
         // 1. Host-to-Device transfer on h2d_stream
         checkError(cudaMemcpyAsync(
-            instance.src[b].d_data, instance.src[b].h_data, instance.src[b].size,
-            cudaMemcpyHostToDevice, instance.h2d_stream
+            instance.src[b].d_data,
+            instance.src[b].h_data,
+            instance.src[b].size,
+            cudaMemcpyHostToDevice,
+            instance.h2d_stream
         ));
         checkError(cudaEventRecord(instance.h2d_done[b], instance.h2d_stream));
 
@@ -133,10 +132,7 @@ std::optional<ErrorMessage> inference(
         if (use_cuda_graph) {
             checkError(cudaGraphLaunch(instance.graphexec[b], instance.stream));
         } else {
-            auto result = enqueueCompute(
-                instance.src[b], instance.dst[b],
-                instance.exec_context, instance.stream
-            );
+            auto result = enqueueCompute(instance.src[b], instance.dst[b], instance.exec_context, instance.stream);
             if (result.has_value()) {
                 return set_error(result.value());
             }
@@ -148,8 +144,11 @@ std::optional<ErrorMessage> inference(
 
         // 5. Device-to-Host transfer on d2h_stream
         checkError(cudaMemcpyAsync(
-            instance.dst[b].h_data, instance.dst[b].d_data, instance.dst[b].size,
-            cudaMemcpyDeviceToHost, instance.d2h_stream
+            instance.dst[b].h_data,
+            instance.dst[b].d_data,
+            instance.dst[b].size,
+            cudaMemcpyDeviceToHost,
+            instance.d2h_stream
         ));
         checkError(cudaEventRecord(instance.d2h_done[b], instance.d2h_stream));
 
@@ -157,13 +156,13 @@ std::optional<ErrorMessage> inference(
     };
 
     auto unpack_tile = [&](size_t tile_idx, int b) -> std::optional<ErrorMessage> {
-        const auto & tile = tiles[tile_idx];
+        const auto& tile = tiles[tile_idx];
         checkError(cudaEventSynchronize(instance.d2h_done[b]));
 
-        const uint8_t * h_data = instance.dst[b].h_data.data;
-        for (uint8_t * _dst_ptr : dst_ptrs) {
-            uint8_t * dst_ptr { _dst_ptr +
-                info.h_scale * tile.y * info.out.pitch + info.w_scale * tile.x * info.out.bytes_per_sample
+        const uint8_t* h_data = instance.dst[b].h_data.data;
+        for (uint8_t* _dst_ptr : dst_ptrs) {
+            uint8_t* dst_ptr{
+                _dst_ptr + info.h_scale * tile.y * info.out.pitch + info.w_scale * tile.x * info.out.bytes_per_sample
             };
 
             vsh::bitblt(
@@ -171,7 +170,9 @@ std::optional<ErrorMessage> inference(
                 info.out.pitch,
                 h_data + (tile.y_crop_start * dst_tile_w_bytes + tile.x_crop_start * info.out.bytes_per_sample),
                 dst_tile_w_bytes,
-                static_cast<size_t>(dst_tile_w_bytes - (tile.x_crop_start + tile.x_crop_end) * info.out.bytes_per_sample),
+                static_cast<size_t>(
+                    dst_tile_w_bytes - (tile.x_crop_start + tile.x_crop_end) * info.out.bytes_per_sample
+                ),
                 static_cast<size_t>(dst_tile_h - (tile.y_crop_start + tile.y_crop_end))
             );
 

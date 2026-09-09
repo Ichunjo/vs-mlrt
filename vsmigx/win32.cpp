@@ -1,10 +1,10 @@
 #ifdef _MSC_VER
-#include <windows.h>
 #include <delayimp.h>
+#include <filesystem>
+#include <stdexcept>
 #include <string>
 #include <vector>
-#include <stdexcept>
-#include <filesystem>
+#include <windows.h>
 
 #define DLL_DIR L"vsmlrt-hip"
 
@@ -24,7 +24,11 @@ namespace fs = std::filesystem;
 static fs::path dllDir() {
     static const std::wstring res = []() -> std::wstring {
         HMODULE mod = 0;
-        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (char *)dllDir, &mod)) {
+        if (GetModuleHandleExA(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                (char*)dllDir,
+                &mod
+            )) {
             std::vector<wchar_t> buf;
             size_t n = 0;
             do {
@@ -43,7 +47,7 @@ static fs::path dllDir() {
 FARPROC loadDLLs() {
     fs::path dir = dllDir() / DLL_DIR;
     HMODULE h = nullptr;
-    for (const auto dll: dlls) {
+    for (const auto dll : dlls) {
         fs::path p = dir / dll;
         std::wstring s = p;
         h = LoadLibraryW(s.c_str());
@@ -62,10 +66,9 @@ extern "C" FARPROC WINAPI delayload_hook(unsigned reason, DelayLoadInfo* info) {
         // Nothing to do here.
         break;
     case dliNotePreLoadLibrary:
-        //std::cerr << "loading " << info->szDll << std::endl;
+        // std::cerr << "loading " << info->szDll << std::endl;
         if (std::string(info->szDll).find("migraphx_c.dll") != std::string::npos ||
-            std::string(info->szDll).find("amdhip64_6.dll") != std::string::npos
-        )
+            std::string(info->szDll).find("amdhip64_6.dll") != std::string::npos)
             return loadDLLs();
         break;
     case dliNotePreGetProcAddress:
@@ -89,7 +92,7 @@ extern "C" FARPROC WINAPI delayload_hook(unsigned reason, DelayLoadInfo* info) {
 } // namespace
 
 extern "C" {
-    const PfnDliHook __pfnDliNotifyHook2 = delayload_hook;
-    const PfnDliHook __pfnDliFailureHook2 = delayload_hook;
+const PfnDliHook __pfnDliNotifyHook2 = delayload_hook;
+const PfnDliHook __pfnDliFailureHook2 = delayload_hook;
 };
 #endif

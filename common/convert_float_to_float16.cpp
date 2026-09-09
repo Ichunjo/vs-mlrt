@@ -1,12 +1,15 @@
 // re-implemented and modified from
 // https://github.com/microsoft/onnxruntime/blob/v1.10.0/onnxruntime/python/tools/transformers/float16.py
 
+#include "convert_float_to_float16.h"
+
 #include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <onnx/onnx_pb.h>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -16,24 +19,16 @@
 #include <variant>
 #include <vector>
 
-#include <onnx/onnx_pb.h>
-
-#include "convert_float_to_float16.h"
-
-
 namespace {
 struct InitializerTracker {
-    ONNX_NAMESPACE::TensorProto * initializer;
-    std::vector<ONNX_NAMESPACE::NodeProto *> fp32_nodes;
-    std::vector<ONNX_NAMESPACE::NodeProto *> fp16_nodes;
+    ONNX_NAMESPACE::TensorProto* initializer;
+    std::vector<ONNX_NAMESPACE::NodeProto*> fp32_nodes;
+    std::vector<ONNX_NAMESPACE::NodeProto*> fp16_nodes;
 
-    InitializerTracker(ONNX_NAMESPACE::TensorProto * initializer) :
-        initializer(initializer), fp32_nodes(), fp16_nodes() {}
+    InitializerTracker(ONNX_NAMESPACE::TensorProto* initializer)
+        : initializer(initializer), fp32_nodes(), fp16_nodes() {}
 
-    void add_node(
-        ONNX_NAMESPACE::NodeProto * node,
-        bool is_node_blocked
-    ) noexcept {
+    void add_node(ONNX_NAMESPACE::NodeProto* node, bool is_node_blocked) noexcept {
 
         if (is_node_blocked) {
             fp32_nodes.emplace_back(node);
@@ -42,14 +37,10 @@ struct InitializerTracker {
         }
     }
 };
-}
-
+} // namespace
 
 template <typename T>
-static ONNX_NAMESPACE::AttributeProto make_attribute(
-    const std::string_view & key,
-    const T & value
-) noexcept {
+static ONNX_NAMESPACE::AttributeProto make_attribute(const std::string_view& key, const T& value) noexcept {
 
     auto attr = ONNX_NAMESPACE::AttributeProto{};
 
@@ -107,22 +98,15 @@ static ONNX_NAMESPACE::AttributeProto make_attribute(
     return attr;
 }
 
-
 // base
-static inline ONNX_NAMESPACE::NodeProto make_node(
-    ONNX_NAMESPACE::NodeProto && node
-) noexcept {
+static inline ONNX_NAMESPACE::NodeProto make_node(ONNX_NAMESPACE::NodeProto&& node) noexcept {
     return node;
 }
 
 // recursive
 template <typename T, typename... Targs>
-static inline ONNX_NAMESPACE::NodeProto make_node(
-    ONNX_NAMESPACE::NodeProto && node,
-    const std::string_view & key,
-    const T & value,
-    Targs... kwargs
-) noexcept {
+static inline ONNX_NAMESPACE::NodeProto
+make_node(ONNX_NAMESPACE::NodeProto&& node, const std::string_view& key, const T& value, Targs... kwargs) noexcept {
 
     node.mutable_attribute()->Add(make_attribute(key, value));
     return make_node(std::move(node), kwargs...);
@@ -131,10 +115,10 @@ static inline ONNX_NAMESPACE::NodeProto make_node(
 // frontend
 template <typename... Targs>
 static ONNX_NAMESPACE::NodeProto make_node(
-    const std::string_view & op_type,
-    const std::vector<std::string> & inputs,
-    const std::vector<std::string> & outputs,
-    const std::string_view & name,
+    const std::string_view& op_type,
+    const std::vector<std::string>& inputs,
+    const std::vector<std::string>& outputs,
+    const std::string_view& name,
     Targs... kwargs
 ) noexcept {
 
@@ -153,7 +137,6 @@ static ONNX_NAMESPACE::NodeProto make_node(
 
     return make_node(std::move(node), kwargs...);
 }
-
 
 // simplified from
 // https://github.com/numpy/numpy/blob/v1.21.5/numpy/core/src/npymath/halffloat.c#L243-L364
@@ -185,25 +168,18 @@ static inline uint16_t float_to_half(uint32_t f) noexcept {
     return h_sgn + h_exp + h_sig;
 }
 
-
 template <typename T>
-static inline void convert_float_to_float16(
-    T * __restrict dst_array,
-    const float * __restrict src_array,
-    int n
-) noexcept {
+static inline void
+convert_float_to_float16(T* __restrict dst_array, const float* __restrict src_array, int n) noexcept {
 
-    auto src_array_u32 = reinterpret_cast<const uint32_t *>(src_array);
+    auto src_array_u32 = reinterpret_cast<const uint32_t*>(src_array);
 
     for (int i = 0; i < n; ++i) {
         dst_array[i] = static_cast<T>(float_to_half(src_array_u32[i]));
     }
 }
 
-
-static void convert_tensor_float_to_float16(
-    ONNX_NAMESPACE::TensorProto & tensor
-) noexcept {
+static void convert_tensor_float_to_float16(ONNX_NAMESPACE::TensorProto& tensor) noexcept {
 
     if (tensor.data_type() == ONNX_NAMESPACE::TensorProto::FLOAT) {
         tensor.set_data_type(ONNX_NAMESPACE::TensorProto::FLOAT16);
@@ -211,58 +187,49 @@ static void convert_tensor_float_to_float16(
         if (tensor.float_data_size() != 0) {
             int n = tensor.float_data_size();
             tensor.mutable_int32_data()->Resize(n, 0);
-            convert_float_to_float16(
-                tensor.mutable_int32_data()->mutable_data(),
-                std::data(tensor.float_data()),
-                n
-            );
+            convert_float_to_float16(tensor.mutable_int32_data()->mutable_data(), std::data(tensor.float_data()), n);
             tensor.clear_float_data();
         }
         if (tensor.has_raw_data()) {
-            std::string & raw_data = *tensor.mutable_raw_data();
+            std::string& raw_data = *tensor.mutable_raw_data();
 
             auto nbytes = std::size(raw_data);
-            std::unique_ptr<float [], decltype(&free)> data {
-                (float *) malloc(nbytes),
-                free
-            };
+            std::unique_ptr<float[], decltype(&free)> data{(float*)malloc(nbytes), free};
             memcpy(data.get(), std::data(raw_data), nbytes);
 
             auto n = nbytes / sizeof(float);
             raw_data.resize(n * sizeof(uint16_t));
 
-            convert_float_to_float16((uint16_t *) std::data(raw_data), data.get(), n);
+            convert_float_to_float16((uint16_t*)std::data(raw_data), data.get(), n);
         }
     }
 }
 
-
 static ONNX_NAMESPACE::TypeProto make_tensor_type_proto(
     int32_t elem_type,
-    const google::protobuf::RepeatedField<google::protobuf::int64> & shape
+    const google::protobuf::RepeatedField<google::protobuf::int64>& shape
 ) noexcept {
 
     auto type_proto = ONNX_NAMESPACE::TypeProto{};
 
-    auto & tensor_type_proto = *type_proto.mutable_tensor_type();
+    auto& tensor_type_proto = *type_proto.mutable_tensor_type();
     tensor_type_proto.set_elem_type(elem_type);
 
-    auto & tensor_shape_proto = *tensor_type_proto.mutable_shape();
+    auto& tensor_shape_proto = *tensor_type_proto.mutable_shape();
     tensor_shape_proto.mutable_dim()->Reserve(shape.size());
     for (auto d : shape) {
-        auto & dim = *tensor_shape_proto.mutable_dim()->Add();
+        auto& dim = *tensor_shape_proto.mutable_dim()->Add();
         dim.set_dim_value(d);
     }
 
     return type_proto;
 }
 
-
 static ONNX_NAMESPACE::ValueInfoProto make_tensor_value_info(
-    const std::string_view & name,
+    const std::string_view& name,
     int32_t elem_type,
-    const google::protobuf::RepeatedField<google::protobuf::int64> & shape,
-    const std::optional<std::string> & doc_string = {}
+    const google::protobuf::RepeatedField<google::protobuf::int64>& shape,
+    const std::optional<std::string>& doc_string = {}
 ) noexcept {
 
     auto value_info_proto = ONNX_NAMESPACE::ValueInfoProto{};
@@ -278,43 +245,36 @@ static ONNX_NAMESPACE::ValueInfoProto make_tensor_value_info(
     return value_info_proto;
 }
 
+static ONNX_NAMESPACE::ValueInfoProto make_value_info_from_tensor(const ONNX_NAMESPACE::TensorProto& tensor) noexcept {
 
-static ONNX_NAMESPACE::ValueInfoProto make_value_info_from_tensor(
-    const ONNX_NAMESPACE::TensorProto & tensor
-) noexcept {
-
-    return make_tensor_value_info(
-        tensor.name(),
-        tensor.data_type(),
-        tensor.dims()
-    );
+    return make_tensor_value_info(tensor.name(), tensor.data_type(), tensor.dims());
 }
 
-
 void convert_float_to_float16(
-    ONNX_NAMESPACE::ModelProto & model,
+    ONNX_NAMESPACE::ModelProto& model,
     bool force_fp16_initializers,
     // bool keep_io_types = True,
     // bool disable_shape_infer = True,
-    // const std::optional<std::unordered_set<std::string>> op_block_list = DEFAULT_OP_BLOCK_LIST,
-    // const std::optional<std::unordered_set<std::string>> op_block_list = {},
-    const std::unordered_set<std::string> & op_block_list,
+    // const std::optional<std::unordered_set<std::string>> op_block_list =
+    // DEFAULT_OP_BLOCK_LIST, const
+    // std::optional<std::unordered_set<std::string>> op_block_list = {},
+    const std::unordered_set<std::string>& op_block_list,
     bool cast_input,
     bool cast_output,
-    std::string * warning_out
+    std::string* warning_out
 ) noexcept {
 
-    std::vector<ONNX_NAMESPACE::ValueInfoProto> value_info_list {};
-    std::unordered_set<std::string> io_casts {};
+    std::vector<ONNX_NAMESPACE::ValueInfoProto> value_info_list{};
+    std::unordered_set<std::string> io_casts{};
 
-    std::unordered_map<std::string, std::string> name_mapping {};
-    std::unordered_set<std::string> graph_io_to_skip {};
+    std::unordered_map<std::string, std::string> name_mapping{};
+    std::unordered_set<std::string> graph_io_to_skip{};
 
     if (cast_input) {
         const std::vector<std::string> fp32_inputs = [&]() {
-            std::vector<std::string> ret {};
+            std::vector<std::string> ret{};
 
-            for (const auto & n : model.graph().input()) {
+            for (const auto& n : model.graph().input()) {
                 if (n.type().tensor_type().elem_type() == ONNX_NAMESPACE::TensorProto::FLOAT) {
                     ret.emplace_back(n.name());
                 }
@@ -323,33 +283,31 @@ void convert_float_to_float16(
             return ret;
         }();
 
-        for (const auto & n : model.graph().input()) {
+        for (const auto& n : model.graph().input()) {
             if (auto idx = std::find(std::cbegin(fp32_inputs), std::cend(fp32_inputs), n.name());
-                idx != std::cend(fp32_inputs)
-            ) {
+                idx != std::cend(fp32_inputs)) {
                 const auto i = idx - std::cbegin(fp32_inputs);
                 std::string node_name = "graph_input_cast_" + std::to_string(i);
                 name_mapping.emplace(n.name(), node_name);
                 graph_io_to_skip.emplace(n.name());
 
-                auto * new_value_info = model.mutable_graph()->mutable_value_info()->Add();
+                auto* new_value_info = model.mutable_graph()->mutable_value_info()->Add();
                 new_value_info->CopyFrom(n);
                 new_value_info->set_name(node_name);
                 new_value_info->mutable_type()->mutable_tensor_type()->set_elem_type(
                     ONNX_NAMESPACE::TensorProto::FLOAT16
                 );
-                // add Cast node (from tensor(float) to tensor(float16) after graph input
-                for (auto & node : *model.mutable_graph()->mutable_node()) {
-                    for (auto & input : *node.mutable_input()) {
+                // add Cast node (from tensor(float) to tensor(float16) after graph
+                // input
+                for (auto& node : *model.mutable_graph()->mutable_node()) {
+                    for (auto& input : *node.mutable_input()) {
                         if (input == n.name()) {
                             input = node_name;
                         }
                     }
                 }
-                auto new_node = make_node(
-                    "Cast", {n.name()}, {node_name}, node_name,
-                    "to", ONNX_NAMESPACE::TensorProto::FLOAT16
-                );
+                auto new_node =
+                    make_node("Cast", {n.name()}, {node_name}, node_name, "to", ONNX_NAMESPACE::TensorProto::FLOAT16);
                 model.mutable_graph()->mutable_node()->Add();
                 for (int i = model.graph().node_size() - 2; i >= 0; --i) {
                     model.mutable_graph()->mutable_node()->SwapElements(i, i + 1);
@@ -363,9 +321,9 @@ void convert_float_to_float16(
 
     if (cast_output) {
         const std::vector<std::string> fp32_outputs = [&]() {
-            std::vector<std::string> ret {};
+            std::vector<std::string> ret{};
 
-            for (const auto & n : model.graph().output()) {
+            for (const auto& n : model.graph().output()) {
                 if (n.type().tensor_type().elem_type() == ONNX_NAMESPACE::TensorProto::FLOAT) {
                     ret.emplace_back(n.name());
                 }
@@ -374,33 +332,31 @@ void convert_float_to_float16(
             return ret;
         }();
 
-        for (const auto & n : model.graph().output()) {
+        for (const auto& n : model.graph().output()) {
             if (auto idx = std::find(std::cbegin(fp32_outputs), std::cend(fp32_outputs), n.name());
-                idx != std::cend(fp32_outputs)
-            ) {
+                idx != std::cend(fp32_outputs)) {
                 const auto i = idx - std::cbegin(fp32_outputs);
                 std::string node_name = "graph_output_cast_" + std::to_string(i);
                 name_mapping.emplace(n.name(), node_name);
                 graph_io_to_skip.emplace(n.name());
 
-                auto * new_value_info = model.mutable_graph()->mutable_value_info()->Add();
+                auto* new_value_info = model.mutable_graph()->mutable_value_info()->Add();
                 new_value_info->CopyFrom(n);
                 new_value_info->set_name(node_name);
                 new_value_info->mutable_type()->mutable_tensor_type()->set_elem_type(
                     ONNX_NAMESPACE::TensorProto::FLOAT16
                 );
-                // add Cast node (from tensor(float16) to tensor(float) before graph output
-                for (auto & node : *model.mutable_graph()->mutable_node()) {
-                    for (auto & output : *node.mutable_output()) {
+                // add Cast node (from tensor(float16) to tensor(float) before graph
+                // output
+                for (auto& node : *model.mutable_graph()->mutable_node()) {
+                    for (auto& output : *node.mutable_output()) {
                         if (output == n.name()) {
                             output = node_name;
                         }
                     }
                 }
-                auto new_node = make_node(
-                    "Cast", {node_name}, {n.name()}, node_name,
-                    "to", ONNX_NAMESPACE::TensorProto::FLOAT
-                );
+                auto new_node =
+                    make_node("Cast", {node_name}, {n.name()}, node_name, "to", ONNX_NAMESPACE::TensorProto::FLOAT);
                 model.mutable_graph()->mutable_node()->Add(std::move(new_node));
                 value_info_list.emplace_back(*new_value_info);
                 io_casts.emplace(std::move(node_name));
@@ -408,62 +364,51 @@ void convert_float_to_float16(
         }
     }
 
-    std::vector<ONNX_NAMESPACE::NodeProto *> node_list {};
+    std::vector<ONNX_NAMESPACE::NodeProto*> node_list{};
 
-    std::vector<std::variant<
-        ONNX_NAMESPACE::ModelProto *,
-        ONNX_NAMESPACE::GraphProto *,
-        ONNX_NAMESPACE::AttributeProto *
-    >> queue {};
+    std::vector<std::variant<ONNX_NAMESPACE::ModelProto*, ONNX_NAMESPACE::GraphProto*, ONNX_NAMESPACE::AttributeProto*>>
+        queue{};
     queue.emplace_back(&model);
 
-    std::unordered_map<std::string, InitializerTracker> fp32_initializers {};
+    std::unordered_map<std::string, InitializerTracker> fp32_initializers{};
     while (!std::empty(queue)) {
-        decltype(queue) next_level {};
-        for (auto & q : queue) {
+        decltype(queue) next_level{};
+        for (auto& q : queue) {
             // if q is model, push q.graph (GraphProto)
-            if (std::holds_alternative<ONNX_NAMESPACE::ModelProto *>(q)) {
-                next_level.emplace_back(
-                    std::get<ONNX_NAMESPACE::ModelProto *>(q)->mutable_graph()
-                );
+            if (std::holds_alternative<ONNX_NAMESPACE::ModelProto*>(q)) {
+                next_level.emplace_back(std::get<ONNX_NAMESPACE::ModelProto*>(q)->mutable_graph());
 
-            // if q is model.graph, push q.node.attribute (AttributeProto)
-            } else if (std::holds_alternative<ONNX_NAMESPACE::GraphProto *>(q)) {
-                auto * q_ = std::get<ONNX_NAMESPACE::GraphProto *>(q);
+                // if q is model.graph, push q.node.attribute (AttributeProto)
+            } else if (std::holds_alternative<ONNX_NAMESPACE::GraphProto*>(q)) {
+                auto* q_ = std::get<ONNX_NAMESPACE::GraphProto*>(q);
 
-                for (auto & n : *q_->mutable_initializer()) {
+                for (auto& n : *q_->mutable_initializer()) {
                     if (n.data_type() == ONNX_NAMESPACE::TensorProto::FLOAT) {
                         assert(fp32_initializers.count(n.name()) == 0);
                         fp32_initializers.emplace(n.name(), InitializerTracker(&n));
                     }
                 }
 
-                for (auto & n : *q_->mutable_node()) {
-                    // if n is in the block list (doesn't support float16), no conversion for the node,
-                    // and save the node for further processing
+                for (auto& n : *q_->mutable_node()) {
+                    // if n is in the block list (doesn't support float16), no conversion
+                    // for the node, and save the node for further processing
                     if (io_casts.count(n.name()) != 0) {
                         continue;
                     }
 
                     bool is_node_blocked = op_block_list.count(n.op_type()) != 0;
 
-                    for (auto & input : *n.mutable_input()) {
-                        if (auto idx = name_mapping.find(input);
-                            idx != std::cend(name_mapping)
-                        ) {
+                    for (auto& input : *n.mutable_input()) {
+                        if (auto idx = name_mapping.find(input); idx != std::cend(name_mapping)) {
                             input = idx->second;
                         }
 
-                        if (auto idx = fp32_initializers.find(input);
-                            idx != std::cend(fp32_initializers)
-                        ) {
+                        if (auto idx = fp32_initializers.find(input); idx != std::cend(fp32_initializers)) {
                             idx->second.add_node(&n, is_node_blocked);
                         }
                     }
-                    for (auto & output : *n.mutable_output()) {
-                        if (auto idx = name_mapping.find(output);
-                            idx != std::cend(name_mapping)
-                        ) {
+                    for (auto& output : *n.mutable_output()) {
+                        if (auto idx = name_mapping.find(output); idx != std::cend(name_mapping)) {
                             output = idx->second;
                         }
                     }
@@ -472,10 +417,8 @@ void convert_float_to_float16(
                         node_list.emplace_back(&n);
                     } else {
                         if (n.op_type() == "Cast") {
-                            for (auto & attr : *n.mutable_attribute()) {
-                                if (attr.name() == "to" &&
-                                    attr.i() == ONNX_NAMESPACE::TensorProto::FLOAT
-                                ) {
+                            for (auto& attr : *n.mutable_attribute()) {
+                                if (attr.name() == "to" && attr.i() == ONNX_NAMESPACE::TensorProto::FLOAT) {
                                     attr.set_i(ONNX_NAMESPACE::TensorProto::FLOAT16);
                                     break;
                                 }
@@ -483,7 +426,7 @@ void convert_float_to_float16(
                         }
 
                         if (n.attribute_size() != 0) {
-                            for (auto & attr : *n.mutable_attribute()) {
+                            for (auto& attr : *n.mutable_attribute()) {
                                 next_level.emplace_back(&attr);
                             }
                         }
@@ -491,7 +434,7 @@ void convert_float_to_float16(
                 }
 
                 // if q is graph, process input, output and value_info (ValueInfoProto)
-                const auto func = [&](auto & n) {
+                const auto func = [&](auto& n) {
                     if (n.type().tensor_type().elem_type() == ONNX_NAMESPACE::TensorProto::FLOAT) {
                         if (graph_io_to_skip.count(n.name()) == 0) {
                             n.mutable_type()->mutable_tensor_type()->set_elem_type(
@@ -502,27 +445,28 @@ void convert_float_to_float16(
                     }
                 };
 
-                for (auto & n : *q_->mutable_input()) {
+                for (auto& n : *q_->mutable_input()) {
                     func(n);
                 }
 
-                for (auto & n : *q_->mutable_output()) {
+                for (auto& n : *q_->mutable_output()) {
                     func(n);
                 }
 
-                for (auto & n : *q_->mutable_value_info()) {
+                for (auto& n : *q_->mutable_value_info()) {
                     func(n);
                 }
 
-            // if q is model.graph.node.attribute, push q.g and q.graphs (GraphProto)
-            // and process node.attribute.t and node.attribute.tensors (TensorProto)
-            } else if (std::holds_alternative<ONNX_NAMESPACE::AttributeProto *>(q)) {
-                auto & q_ = std::get<ONNX_NAMESPACE::AttributeProto *>(q);
+                // if q is model.graph.node.attribute, push q.g and q.graphs
+                // (GraphProto) and process node.attribute.t and node.attribute.tensors
+                // (TensorProto)
+            } else if (std::holds_alternative<ONNX_NAMESPACE::AttributeProto*>(q)) {
+                auto& q_ = std::get<ONNX_NAMESPACE::AttributeProto*>(q);
                 if (q_->has_g()) {
                     next_level.emplace_back(q_->mutable_g());
                 }
                 if (q_->graphs_size() != 0) {
-                    for (auto & graph : *q_->mutable_graphs()) {
+                    for (auto& graph : *q_->mutable_graphs()) {
                         next_level.emplace_back(&graph);
                     }
                 }
@@ -530,7 +474,7 @@ void convert_float_to_float16(
                     convert_tensor_float_to_float16(*q_->mutable_t());
                 }
                 if (q_->tensors_size() != 0) {
-                    for (auto & n : *q_->mutable_tensors()) {
+                    for (auto& n : *q_->mutable_tensors()) {
                         convert_tensor_float_to_float16(n);
                     }
                 }
@@ -540,7 +484,7 @@ void convert_float_to_float16(
         queue = std::move(next_level);
     }
 
-    for (auto & [_, value] : fp32_initializers) {
+    for (auto& [_, value] : fp32_initializers) {
         // to avoid precision loss,
         // do not convert an initializer to fp16 when it is used only by fp32 nodes.
         if (force_fp16_initializers || !std::empty(value.fp16_nodes)) {
@@ -555,54 +499,55 @@ void convert_float_to_float16(
     }
 
     // process the nodes in block list that doesn't support tensor(float16)
-    for (auto & node : node_list) {
-        // if input's name is in the value_info_list meaning input is tensor(float16) type,
-        // insert a float16 to float Cast node before the node,
-        // change current node's input name and create new value_info for the new name
+    for (auto& node : node_list) {
+        // if input's name is in the value_info_list meaning input is
+        // tensor(float16) type, insert a float16 to float Cast node before the
+        // node, change current node's input name and create new value_info for the
+        // new name
         for (int i = 0; i < node->input_size(); ++i) {
-            auto & input = *node->mutable_input(i);
-            for (const auto & value_info : value_info_list) {
+            auto& input = *node->mutable_input(i);
+            for (const auto& value_info : value_info_list) {
                 if (input == value_info.name()) {
                     // create new value_info for current node's new input name
-                    auto * new_value_info = model.mutable_graph()->mutable_value_info()->Add();
+                    auto* new_value_info = model.mutable_graph()->mutable_value_info()->Add();
                     new_value_info->CopyFrom(value_info);
                     std::string output_name = node->name() + "_input_cast_" + std::to_string(i);
                     new_value_info->set_name(output_name);
                     new_value_info->mutable_type()->mutable_tensor_type()->set_elem_type(
                         ONNX_NAMESPACE::TensorProto::FLOAT
                     );
-                    // add Cast node (from tensor(float16) to tensor(float) before current node
+                    // add Cast node (from tensor(float16) to tensor(float) before current
+                    // node
                     std::string node_name = node->name() + "_input_cast" + std::to_string(i);
-                    auto new_node = make_node(
-                        "Cast", {input}, {output_name}, node_name,
-                        "to", ONNX_NAMESPACE::TensorProto::FLOAT
-                    );
+                    auto new_node =
+                        make_node("Cast", {input}, {output_name}, node_name, "to", ONNX_NAMESPACE::TensorProto::FLOAT);
                     model.mutable_graph()->mutable_node()->Add(std::move(new_node));
                     input = std::move(output_name);
                     break;
                 }
             }
         }
-        // if output's name is in the value_info_list meaning output is tensor(float16) type,
-        // insert a float to float16 Cast node after the node,
-        // change current node's output name and create new value_info for the new name
+        // if output's name is in the value_info_list meaning output is
+        // tensor(float16) type, insert a float to float16 Cast node after the node,
+        // change current node's output name and create new value_info for the new
+        // name
         for (int i = 0; i < node->output_size(); ++i) {
-            auto & output = *node->mutable_output(i);
-            for (const auto & value_info : value_info_list) {
+            auto& output = *node->mutable_output(i);
+            for (const auto& value_info : value_info_list) {
                 if (output == value_info.name()) {
                     // create new value_info for current node's new output
-                    auto * new_value_info = model.mutable_graph()->mutable_value_info()->Add();
+                    auto* new_value_info = model.mutable_graph()->mutable_value_info()->Add();
                     new_value_info->CopyFrom(value_info);
                     std::string input_name = node->name() + "_output_cast_" + std::to_string(i);
                     new_value_info->set_name(input_name);
                     new_value_info->mutable_type()->mutable_tensor_type()->set_elem_type(
-                            ONNX_NAMESPACE::TensorProto::FLOAT
-                        );
-                    // add Cast node (from tensor(float) to tensor(float16) after current node
+                        ONNX_NAMESPACE::TensorProto::FLOAT
+                    );
+                    // add Cast node (from tensor(float) to tensor(float16) after current
+                    // node
                     const std::string node_name = node->name() + "_output_cast" + std::to_string(i);
                     auto new_node = make_node(
-                        "Cast", {input_name}, {output}, node_name,
-                        "to", ONNX_NAMESPACE::TensorProto::FLOAT16
+                        "Cast", {input_name}, {output}, node_name, "to", ONNX_NAMESPACE::TensorProto::FLOAT16
                     );
                     model.mutable_graph()->mutable_node()->Add(std::move(new_node));
                     output = std::move(input_name);
