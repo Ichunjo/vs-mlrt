@@ -67,7 +67,7 @@ struct TicketSemaphore {
 };
 
 struct Resource {
-    ov::InferRequest infer_request;
+    std::array<ov::InferRequest, 2> infer_requests;
 };
 
 static std::array<int, 4> getShape(const ov::CompiledModel& network, bool input) {
@@ -411,54 +411,107 @@ static const VSFrame* VS_CC vsOvGetFrame(
         int ticket = d->acquire();
         TicketGuard ticket_guard{d, ticket};
         auto& resource = d->resources[ticket];
-        auto* infer_request = &resource.infer_request;
 
-        for (const auto& tile : d->tile_grid) {
-            {
-                auto input_buffer = (uint8_t*)infer_request->get_input_tensor().data<float>();
+        auto pack_tile = [&](ov::InferRequest& req, const TileDesc& tile) {
+            auto input_buffer = (uint8_t*)req.get_input_tensor().data<float>();
 
-                for (const auto& _src_ptr : src_ptrs) {
-                    const uint8_t* src_ptr{_src_ptr + tile.y * src_stride + tile.x * src_bytes};
+            for (const auto& _src_ptr : src_ptrs) {
+                const uint8_t* src_ptr{_src_ptr + tile.y * src_stride + tile.x * src_bytes};
 
-                    if (src_tile_w_bytes == src_stride) {
-                        std::memcpy(input_buffer, src_ptr, src_tile_bytes);
-                    } else {
-                        vsh::bitblt(input_buffer, src_tile_w_bytes, src_ptr, src_stride, src_tile_w_bytes, src_tile_h);
-                    }
-
-                    input_buffer += src_tile_bytes;
+                if (src_tile_w_bytes == src_stride) {
+                    std::memcpy(input_buffer, src_ptr, src_tile_bytes);
+                } else {
+                    vsh::bitblt(input_buffer, src_tile_w_bytes, src_ptr, src_stride, src_tile_w_bytes, src_tile_h);
                 }
-            }
 
+                input_buffer += src_tile_bytes;
+            }
+        };
+
+        auto unpack_tile = [&](ov::InferRequest& req, const TileDesc& tile) {
+            auto output_buffer = (const uint8_t*)req.get_output_tensor().data<float>();
+
+            for (int plane = 0; plane < dst_planes; ++plane) {
+                uint8_t* dst_ptr = (dst_ptrs[plane] + h_scale * tile.y * dst_stride + w_scale * tile.x * dst_bytes);
+
+                if (tile.x_crop_start == 0 && tile.x_crop_end == 0 && tile.y_crop_start == 0 && tile.y_crop_end == 0 && dst_tile_w_bytes == dst_stride) {
+                    std::memcpy(dst_ptr, output_buffer, dst_tile_bytes);
+                } else {
+                    vsh::bitblt(
+                        dst_ptr + (tile.y_crop_start * dst_stride + tile.x_crop_start * dst_bytes),
+                        dst_stride,
+                        output_buffer + (tile.y_crop_start * dst_tile_w_bytes + tile.x_crop_start * dst_bytes),
+                        dst_tile_w_bytes,
+                        dst_tile_w_bytes - (tile.x_crop_start + tile.x_crop_end) * dst_bytes,
+                        dst_tile_h - (tile.y_crop_start + tile.y_crop_end)
+                    );
+                }
+
+                output_buffer += dst_tile_bytes;
+            }
+        };
+
+        const size_t num_tiles = d->tile_grid.size();
+
+        if (num_tiles == 1) {
+            auto& req = resource.infer_requests[0];
+            pack_tile(req, d->tile_grid[0]);
             try {
-                infer_request->infer();
+                req.start_async();
+                req.wait();
             } catch (const ov::Exception& e) {
                 return set_error("[OV exception] Inference failed: "s + e.what());
             } catch (const std::exception& e) {
                 return set_error("[Standard exception] Inference failed: "s + e.what());
             }
+            unpack_tile(req, d->tile_grid[0]);
+        } else {
+            // Prime pipeline with up to 2 tiles
+            pack_tile(resource.infer_requests[0], d->tile_grid[0]);
+            try {
+                resource.infer_requests[0].start_async();
+            } catch (const std::exception& e) {
+                return set_error("[Inference error] start_async failed: "s + e.what());
+            }
 
-            {
-                auto output_buffer = (const uint8_t*)infer_request->get_output_tensor().data<float>();
+            pack_tile(resource.infer_requests[1], d->tile_grid[1]);
+            try {
+                resource.infer_requests[1].start_async();
+            } catch (const std::exception& e) {
+                resource.infer_requests[0].wait();
+                return set_error("[Inference error] start_async failed: "s + e.what());
+            }
 
-                for (int plane = 0; plane < dst_planes; ++plane) {
-                    uint8_t* dst_ptr = (dst_ptrs[plane] + h_scale * tile.y * dst_stride + w_scale * tile.x * dst_bytes);
+            // Pipelined loop for tiles 2 to num_tiles - 1
+            for (size_t i = 2; i < num_tiles; ++i) {
+                size_t ready_idx = i - 2;
+                size_t buf = ready_idx % 2;
 
-                    if (tile.x_crop_start == 0 && tile.x_crop_end == 0 && tile.y_crop_start == 0 && tile.y_crop_end == 0 && dst_tile_w_bytes == dst_stride) {
-                        std::memcpy(dst_ptr, output_buffer, dst_tile_bytes);
-                    } else {
-                        vsh::bitblt(
-                            dst_ptr + (tile.y_crop_start * dst_stride + tile.x_crop_start * dst_bytes),
-                            dst_stride,
-                            output_buffer + (tile.y_crop_start * dst_tile_w_bytes + tile.x_crop_start * dst_bytes),
-                            dst_tile_w_bytes,
-                            dst_tile_w_bytes - (tile.x_crop_start + tile.x_crop_end) * dst_bytes,
-                            dst_tile_h - (tile.y_crop_start + tile.y_crop_end)
-                        );
-                    }
-
-                    output_buffer += dst_tile_bytes;
+                try {
+                    resource.infer_requests[buf].wait();
+                } catch (const std::exception& e) {
+                    return set_error("[Inference error] wait failed: "s + e.what());
                 }
+
+                unpack_tile(resource.infer_requests[buf], d->tile_grid[ready_idx]);
+
+                pack_tile(resource.infer_requests[buf], d->tile_grid[i]);
+                try {
+                    resource.infer_requests[buf].start_async();
+                } catch (const std::exception& e) {
+                    return set_error("[Inference error] start_async failed: "s + e.what());
+                }
+            }
+
+            // Drain remaining 2 in-flight tiles
+            for (size_t i = num_tiles - 2; i < num_tiles; ++i) {
+                size_t buf = i % 2;
+                try {
+                    resource.infer_requests[buf].wait();
+                } catch (const std::exception& e) {
+                    return set_error("[Inference error] wait failed: "s + e.what());
+                }
+                unpack_tile(resource.infer_requests[buf], d->tile_grid[i]);
             }
         }
 
@@ -721,7 +774,10 @@ static void VS_CC vsOvCreate(const VSMap* in, VSMap* out, void* userData, VSCore
         d->resources.reserve(d->num_streams);
         for (int i = 0; i < d->num_streams; ++i) {
             try {
-                d->resources.push_back(Resource{d->executable_network.create_infer_request()});
+                d->resources.push_back(Resource{
+                    {d->executable_network.create_infer_request(),
+                     d->executable_network.create_infer_request()}
+                });
             } catch (const ov::Exception& e) {
                 return set_error("[OV exception] Create inference request: "s + e.what());
             } catch (const std::exception& e) {
