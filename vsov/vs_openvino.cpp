@@ -9,7 +9,6 @@
 #include <onnx/common/version.h>
 #include <onnx/onnx_pb.h>
 #include <openvino/openvino.hpp>
-#include <openvino/pass/constant_folding.hpp>
 #include <optional>
 #include <shared_mutex>
 #include <sstream>
@@ -27,6 +26,7 @@
 
 #include "../common/convert_float_to_float16.h"
 #include "../common/onnx_utils.h"
+#include "inference_helper.h"
 
 #ifndef PLUGIN_VERSION_MAJOR
 #define PLUGIN_VERSION_MAJOR 1
@@ -244,6 +244,7 @@ struct OVData {
     std::unique_ptr<VSVideoInfo> out_vi;
 
     int overlap_w, overlap_h;
+    std::vector<TileDesc> tile_grid;
 
     ov::Core core;
     ov::CompiledModel executable_network;
@@ -299,9 +300,6 @@ static const VSFrame* VS_CC vsOvGetFrame(
                 src_ptrs.emplace_back(vsapi->getReadPtr(src_frames[i], j));
             }
         }
-
-        auto step_w = src_tile_w - 2 * d->overlap_w;
-        auto step_h = src_tile_h - 2 * d->overlap_h;
 
         VSFrame* const dst_frame =
             vsapi->newVideoFrame(&d->out_vi->format, d->out_vi->width, d->out_vi->height, src_frames.front(), core);
@@ -375,67 +373,53 @@ static const VSFrame* VS_CC vsOvGetFrame(
             infer_request = &d->infer_requests[thread_id];
         }
 
-        int y = 0;
-        while (true) {
-            int y_crop_start = (y == 0) ? 0 : d->overlap_h;
-            int y_crop_end = (y == src_height - src_tile_h) ? 0 : d->overlap_h;
+        for (const auto& tile : d->tile_grid) {
+            {
+                auto input_buffer = (uint8_t*)infer_request->get_input_tensor().data<float>();
 
-            int x = 0;
-            while (true) {
-                int x_crop_start = (x == 0) ? 0 : d->overlap_w;
-                int x_crop_end = (x == src_width - src_tile_w) ? 0 : d->overlap_w;
+                for (const auto& _src_ptr : src_ptrs) {
+                    const uint8_t* src_ptr{_src_ptr + tile.y * src_stride + tile.x * src_bytes};
 
-                {
-                    auto input_buffer = (uint8_t*)infer_request->get_input_tensor().data<float>();
-
-                    for (const auto& _src_ptr : src_ptrs) {
-                        const uint8_t* src_ptr{_src_ptr + y * src_stride + x * src_bytes};
-
+                    if (src_tile_w_bytes == src_stride) {
+                        std::memcpy(input_buffer, src_ptr, src_tile_bytes);
+                    } else {
                         vsh::bitblt(input_buffer, src_tile_w_bytes, src_ptr, src_stride, src_tile_w_bytes, src_tile_h);
-
-                        input_buffer += src_tile_bytes;
                     }
+
+                    input_buffer += src_tile_bytes;
                 }
+            }
 
-                try {
-                    infer_request->infer();
-                } catch (const ov::Exception& e) {
-                    return set_error("[OV exception] Create inference request: "s + e.what());
-                } catch (const std::exception& e) {
-                    return set_error("[Standard exception] Create inference request: "s + e.what());
-                }
+            try {
+                infer_request->infer();
+            } catch (const ov::Exception& e) {
+                return set_error("[OV exception] Inference failed: "s + e.what());
+            } catch (const std::exception& e) {
+                return set_error("[Standard exception] Inference failed: "s + e.what());
+            }
 
-                {
-                    auto output_buffer = (const uint8_t*)infer_request->get_output_tensor().data<float>();
+            {
+                auto output_buffer = (const uint8_t*)infer_request->get_output_tensor().data<float>();
 
-                    for (int plane = 0; plane < dst_planes; ++plane) {
-                        uint8_t* dst_ptr = (dst_ptrs[plane] + h_scale * y * dst_stride + w_scale * x * dst_bytes);
+                for (int plane = 0; plane < dst_planes; ++plane) {
+                    uint8_t* dst_ptr = (dst_ptrs[plane] + h_scale * tile.y * dst_stride + w_scale * tile.x * dst_bytes);
 
+                    if (tile.x_crop_start == 0 && tile.x_crop_end == 0 && tile.y_crop_start == 0 && tile.y_crop_end == 0 && dst_tile_w_bytes == dst_stride) {
+                        std::memcpy(dst_ptr, output_buffer, dst_tile_bytes);
+                    } else {
                         vsh::bitblt(
-                            dst_ptr + (y_crop_start * dst_stride + x_crop_start * dst_bytes),
+                            dst_ptr + (tile.y_crop_start * dst_stride + tile.x_crop_start * dst_bytes),
                             dst_stride,
-                            output_buffer + (y_crop_start * dst_tile_w_bytes + x_crop_start * dst_bytes),
+                            output_buffer + (tile.y_crop_start * dst_tile_w_bytes + tile.x_crop_start * dst_bytes),
                             dst_tile_w_bytes,
-                            dst_tile_w_bytes - (x_crop_start + x_crop_end) * dst_bytes,
-                            dst_tile_h - (y_crop_start + y_crop_end)
+                            dst_tile_w_bytes - (tile.x_crop_start + tile.x_crop_end) * dst_bytes,
+                            dst_tile_h - (tile.y_crop_start + tile.y_crop_end)
                         );
-
-                        output_buffer += dst_tile_bytes;
                     }
+
+                    output_buffer += dst_tile_bytes;
                 }
-
-                if (x + src_tile_w == src_width) {
-                    break;
-                }
-
-                x = std::min(x + step_w, src_width - src_tile_w);
             }
-
-            if (y + src_tile_h == src_height) {
-                break;
-            }
-
-            y = std::min(y + step_h, src_height - src_tile_h);
         }
 
         for (const auto& frame : src_frames) {
@@ -550,6 +534,9 @@ static void VS_CC vsOvCreate(const VSMap* in, VSMap* out, void* userData, VSCore
         return set_error("\"overlap\" too large");
     }
 
+    d->tile_grid =
+        generateTiles(in_vis.front()->width, in_vis.front()->height, tile_w, tile_h, d->overlap_w, d->overlap_h);
+
     bool fp16 = !!vsapi->mapGetInt(in, "fp16", 0, &error);
     if (error) {
         fp16 = false;
@@ -644,12 +631,6 @@ static void VS_CC vsOvCreate(const VSMap* in, VSMap* out, void* userData, VSCore
 
         if (auto err = checkNetwork(network, !d->flexible_output_prop.empty()); err.has_value()) {
             return set_error(err.value());
-        }
-
-        try {
-            ov::pass::ConstantFolding().run_on_model(network);
-        } catch (const ov::Exception& e) {
-            return set_error(e.what());
         }
 
 #ifdef ENABLE_VISUALIZATION
