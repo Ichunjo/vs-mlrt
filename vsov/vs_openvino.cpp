@@ -359,8 +359,9 @@ static const VSFrame* VS_CC vsOvGetFrame(
             }
         }
 
-        VSFrame* const dst_frame =
-            vsapi->newVideoFrame(&d->out_vi->format, d->out_vi->width, d->out_vi->height, resource.src_frames.front(), core);
+        VSFrame* const dst_frame = vsapi->newVideoFrame(
+            &d->out_vi->format, d->out_vi->width, d->out_vi->height, resource.src_frames.front(), core
+        );
 
         auto dst_stride = vsapi->getStride(dst_frame, 0);
 
@@ -372,9 +373,9 @@ static const VSFrame* VS_CC vsOvGetFrame(
             }
         } else {
             for (int i = 0; i < d->out_tile_c; ++i) {
-                auto frame{
-                    vsapi->newVideoFrame(&d->out_vi->format, d->out_vi->width, d->out_vi->height, resource.src_frames[0], core)
-                };
+                auto frame{vsapi->newVideoFrame(
+                    &d->out_vi->format, d->out_vi->width, d->out_vi->height, resource.src_frames[0], core
+                )};
                 resource.dst_frames.emplace_back(frame);
                 resource.dst_ptrs.emplace_back(vsapi->getWritePtr(frame, 0));
             }
@@ -405,7 +406,9 @@ static const VSFrame* VS_CC vsOvGetFrame(
                 if (d->in_tile_w_bytes == src_stride) {
                     std::memcpy(input_buffer, src_ptr, d->in_tile_bytes);
                 } else {
-                    vsh::bitblt(input_buffer, d->in_tile_w_bytes, src_ptr, src_stride, d->in_tile_w_bytes, d->in_tile_h);
+                    vsh::bitblt(
+                        input_buffer, d->in_tile_w_bytes, src_ptr, src_stride, d->in_tile_w_bytes, d->in_tile_h
+                    );
                 }
 
                 input_buffer += d->in_tile_bytes;
@@ -416,9 +419,11 @@ static const VSFrame* VS_CC vsOvGetFrame(
             auto output_buffer = (const uint8_t*)req.get_output_tensor().data<float>();
 
             for (int plane = 0; plane < d->out_tile_c; ++plane) {
-                uint8_t* dst_ptr = (resource.dst_ptrs[plane] + d->h_scale * tile.y * dst_stride + d->w_scale * tile.x * 4);
+                uint8_t* dst_ptr =
+                    (resource.dst_ptrs[plane] + d->h_scale * tile.y * dst_stride + d->w_scale * tile.x * 4);
 
-                if (tile.x_crop_start == 0 && tile.x_crop_end == 0 && tile.y_crop_start == 0 && tile.y_crop_end == 0 && d->out_tile_w_bytes == dst_stride) {
+                if (tile.x_crop_start == 0 && tile.x_crop_end == 0 && tile.y_crop_start == 0 && tile.y_crop_end == 0 &&
+                    d->out_tile_w_bytes == dst_stride) {
                     std::memcpy(dst_ptr, output_buffer, d->out_tile_bytes);
                 } else {
                     vsh::bitblt(
@@ -775,8 +780,7 @@ static void VS_CC vsOvCreate(const VSMap* in, VSMap* out, void* userData, VSCore
         for (int i = 0; i < d->num_streams; ++i) {
             try {
                 Resource res{
-                    {d->executable_network.create_infer_request(),
-                     d->executable_network.create_infer_request()}
+                    {d->executable_network.create_infer_request(), d->executable_network.create_infer_request()}
                 };
                 res.src_frames.reserve(d->nodes.size());
                 res.src_ptrs.reserve(d->in_tile_c);
