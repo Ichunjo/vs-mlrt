@@ -2,15 +2,16 @@
 #include <VSHelper4.h>
 #include <VapourSynth4.h>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <onnx/common/version.h>
 #include <onnx/onnx_pb.h>
 #include <openvino/openvino.hpp>
 #include <optional>
-#include <shared_mutex>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -41,6 +42,33 @@
 using namespace std::string_literals;
 
 #define PLUGIN_ID "io.github.amusementclub.vs_openvino"
+
+struct TicketSemaphore {
+    std::atomic<intptr_t> ticket{};
+    std::atomic<intptr_t> current{};
+
+    void init(intptr_t num) noexcept { current.store(num, std::memory_order::seq_cst); }
+
+    void acquire() noexcept {
+        intptr_t tk{ticket.fetch_add(1, std::memory_order::acquire)};
+        while (true) {
+            intptr_t curr{current.load(std::memory_order::acquire)};
+            if (tk < curr) {
+                return;
+            }
+            current.wait(curr, std::memory_order::relaxed);
+        }
+    }
+
+    void release() noexcept {
+        current.fetch_add(1, std::memory_order::release);
+        current.notify_all();
+    }
+};
+
+struct Resource {
+    ov::InferRequest infer_request;
+};
 
 static std::array<int, 4> getShape(const ov::CompiledModel& network, bool input) {
 
@@ -246,12 +274,43 @@ struct OVData {
     int overlap_w, overlap_h;
     std::vector<TileDesc> tile_grid;
 
+    int num_streams;
+    TicketSemaphore semaphore;
+    std::vector<int> tickets;
+    std::mutex ticket_lock;
+    std::vector<Resource> resources;
+
     ov::Core core;
     ov::CompiledModel executable_network;
-    std::unordered_map<std::thread::id, ov::InferRequest> infer_requests;
-    std::shared_mutex infer_requests_lock;
 
     std::string flexible_output_prop;
+
+    [[nodiscard]]
+    int acquire() noexcept {
+        semaphore.acquire();
+        std::lock_guard<std::mutex> lock{ticket_lock};
+        int ticket = tickets.back();
+        tickets.pop_back();
+        return ticket;
+    }
+
+    void release(int ticket) noexcept {
+        {
+            std::lock_guard<std::mutex> lock{ticket_lock};
+            tickets.push_back(ticket);
+        }
+        semaphore.release();
+    }
+};
+
+struct TicketGuard {
+    OVData* d;
+    int ticket;
+    ~TicketGuard() {
+        if (d && ticket >= 0) {
+            d->release(ticket);
+        }
+    }
 };
 
 static const VSFrame* VS_CC vsOvGetFrame(
@@ -349,29 +408,10 @@ static const VSFrame* VS_CC vsOvGetFrame(
             return nullptr;
         };
 
-        auto thread_id = std::this_thread::get_id();
-        bool initialized = true;
-        ov::InferRequest* infer_request;
-
-        d->infer_requests_lock.lock_shared();
-        try {
-            infer_request = &d->infer_requests.at(thread_id);
-        } catch (const std::out_of_range&) {
-            initialized = false;
-        }
-        d->infer_requests_lock.unlock_shared();
-
-        if (!initialized) {
-            std::lock_guard _{d->infer_requests_lock};
-            try {
-                d->infer_requests.emplace(thread_id, d->executable_network.create_infer_request());
-            } catch (const ov::Exception& e) {
-                return set_error("[OV exception] Create inference request: "s + e.what());
-            } catch (const std::exception& e) {
-                return set_error("[Standard exception] Create inference request: "s + e.what());
-            }
-            infer_request = &d->infer_requests[thread_id];
-        }
+        int ticket = d->acquire();
+        TicketGuard ticket_guard{d, ticket};
+        auto& resource = d->resources[ticket];
+        auto* infer_request = &resource.infer_request;
 
         for (const auto& tile : d->tile_grid) {
             {
@@ -537,6 +577,13 @@ static void VS_CC vsOvCreate(const VSMap* in, VSMap* out, void* userData, VSCore
     d->tile_grid =
         generateTiles(in_vis.front()->width, in_vis.front()->height, tile_w, tile_h, d->overlap_w, d->overlap_h);
 
+    d->num_streams = vsapi->mapGetInt(in, "num_streams", 0, &error);
+    if (error || d->num_streams <= 0) {
+        VSCoreInfo core_info;
+        vsapi->getCoreInfo(core, &core_info);
+        d->num_streams = core_info.numThreads;
+    }
+
     bool fp16 = !!vsapi->mapGetInt(in, "fp16", 0, &error);
     if (error) {
         fp16 = false;
@@ -651,6 +698,9 @@ static void VS_CC vsOvCreate(const VSMap* in, VSMap* out, void* userData, VSCore
             return set_error(std::get<std::string>(config_ret));
         }
         auto& config = std::get<ov::AnyMap>(config_ret);
+        if (config.find("NUM_STREAMS") == config.end()) {
+            config["NUM_STREAMS"] = std::to_string(d->num_streams);
+        }
 
         try {
             d->executable_network = d->core.compile_model(network, device, config);
@@ -664,9 +714,20 @@ static void VS_CC vsOvCreate(const VSMap* in, VSMap* out, void* userData, VSCore
 
         setDimensions(d->out_vi, d->executable_network, core, vsapi, !d->flexible_output_prop.empty());
 
-        VSCoreInfo core_info;
-        vsapi->getCoreInfo(core, &core_info);
-        d->infer_requests.reserve(core_info.numThreads);
+        d->semaphore.init(d->num_streams);
+        d->tickets.resize(d->num_streams);
+        std::iota(d->tickets.begin(), d->tickets.end(), 0);
+
+        d->resources.reserve(d->num_streams);
+        for (int i = 0; i < d->num_streams; ++i) {
+            try {
+                d->resources.push_back(Resource{d->executable_network.create_infer_request()});
+            } catch (const ov::Exception& e) {
+                return set_error("[OV exception] Create inference request: "s + e.what());
+            } catch (const std::exception& e) {
+                return set_error("[Standard exception] Create inference request: "s + e.what());
+            }
+        }
     }
 
     if (!d->flexible_output_prop.empty()) {
@@ -716,6 +777,7 @@ VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI* vspapi) {
         "overlap:int[]:opt;"
         "tilesize:int[]:opt;"
         "device:data:opt;" // "CPU": CPU
+        "num_streams:int:opt;"
         "fp16:int:opt;"
         "config:func:opt;"
         "path_is_serialization:int:opt;"
