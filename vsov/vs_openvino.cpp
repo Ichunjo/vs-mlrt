@@ -68,6 +68,10 @@ struct TicketSemaphore {
 
 struct Resource {
     std::array<ov::InferRequest, 2> infer_requests;
+    std::vector<const VSFrame*> src_frames;
+    std::vector<const uint8_t*> src_ptrs;
+    std::vector<uint8_t*> dst_ptrs;
+    std::vector<VSFrame*> dst_frames;
 };
 
 static std::array<int, 4> getShape(const ov::CompiledModel& network, bool input) {
@@ -270,9 +274,16 @@ static std::variant<std::string, ov::AnyMap> getConfig(VSFunction* config_func, 
 struct OVData {
     std::vector<VSNode*> nodes;
     std::unique_ptr<VSVideoInfo> out_vi;
+    std::vector<const VSVideoInfo*> in_vis;
 
     int overlap_w, overlap_h;
     std::vector<TileDesc> tile_grid;
+
+    int in_tile_c, in_tile_w, in_tile_h;
+    int in_tile_w_bytes, in_tile_bytes;
+    int out_tile_c, out_tile_w, out_tile_h;
+    int out_tile_w_bytes, out_tile_bytes;
+    int h_scale, w_scale;
 
     int num_streams;
     TicketSemaphore semaphore;
@@ -330,124 +341,97 @@ static const VSFrame* VS_CC vsOvGetFrame(
             vsapi->requestFrameFilter(n, node, frameCtx);
         }
     } else if (activationReason == arAllFramesReady) {
-        std::vector<const VSVideoInfo*> in_vis;
-        in_vis.reserve(std::size(d->nodes));
+        int ticket = d->acquire();
+        TicketGuard ticket_guard{d, ticket};
+        auto& resource = d->resources[ticket];
+
+        resource.src_frames.clear();
         for (const auto& node : d->nodes) {
-            in_vis.emplace_back(vsapi->getVideoInfo(node));
+            resource.src_frames.emplace_back(vsapi->getFrameFilter(n, node, frameCtx));
         }
 
-        std::vector<const VSFrame*> src_frames;
-        src_frames.reserve(std::size(d->nodes));
-        for (const auto& node : d->nodes) {
-            src_frames.emplace_back(vsapi->getFrameFilter(n, node, frameCtx));
-        }
+        auto src_stride = vsapi->getStride(resource.src_frames.front(), 0);
 
-        auto src_stride = vsapi->getStride(src_frames.front(), 0);
-        auto src_width = vsapi->getFrameWidth(src_frames.front(), 0);
-        auto src_height = vsapi->getFrameHeight(src_frames.front(), 0);
-        auto src_bytes = vsapi->getVideoFrameFormat(src_frames.front())->bytesPerSample;
-        auto src_tile_shape = getShape(d->executable_network, true);
-        auto src_tile_h = src_tile_shape[2];
-        auto src_tile_w = src_tile_shape[3];
-        auto src_tile_w_bytes = src_tile_w * src_bytes;
-        auto src_tile_bytes = src_tile_h * src_tile_w_bytes;
-
-        std::vector<const uint8_t*> src_ptrs;
-        src_ptrs.reserve(src_tile_shape[1]);
+        resource.src_ptrs.clear();
         for (unsigned i = 0; i < std::size(d->nodes); ++i) {
-            for (int j = 0; j < in_vis[i]->format.numPlanes; ++j) {
-                src_ptrs.emplace_back(vsapi->getReadPtr(src_frames[i], j));
+            for (int j = 0; j < d->in_vis[i]->format.numPlanes; ++j) {
+                resource.src_ptrs.emplace_back(vsapi->getReadPtr(resource.src_frames[i], j));
             }
         }
 
         VSFrame* const dst_frame =
-            vsapi->newVideoFrame(&d->out_vi->format, d->out_vi->width, d->out_vi->height, src_frames.front(), core);
-
-        std::vector<VSFrame*> dst_frames;
+            vsapi->newVideoFrame(&d->out_vi->format, d->out_vi->width, d->out_vi->height, resource.src_frames.front(), core);
 
         auto dst_stride = vsapi->getStride(dst_frame, 0);
-        auto dst_bytes = vsapi->getVideoFrameFormat(dst_frame)->bytesPerSample;
-        auto dst_tile_shape = getShape(d->executable_network, false);
-        auto dst_tile_h = dst_tile_shape[2];
-        auto dst_tile_w = dst_tile_shape[3];
-        auto dst_tile_w_bytes = dst_tile_w * dst_bytes;
-        auto dst_tile_bytes = dst_tile_h * dst_tile_w_bytes;
-        auto dst_planes = dst_tile_shape[1];
 
-        std::vector<uint8_t*> dst_ptrs;
+        resource.dst_ptrs.clear();
+        resource.dst_frames.clear();
         if (d->flexible_output_prop.empty()) {
-            for (int i = 0; i < dst_planes; ++i) {
-                dst_ptrs.emplace_back(vsapi->getWritePtr(dst_frame, i));
+            for (int i = 0; i < d->out_tile_c; ++i) {
+                resource.dst_ptrs.emplace_back(vsapi->getWritePtr(dst_frame, i));
             }
         } else {
-            for (int i = 0; i < dst_planes; ++i) {
+            for (int i = 0; i < d->out_tile_c; ++i) {
                 auto frame{
-                    vsapi->newVideoFrame(&d->out_vi->format, d->out_vi->width, d->out_vi->height, src_frames[0], core)
+                    vsapi->newVideoFrame(&d->out_vi->format, d->out_vi->width, d->out_vi->height, resource.src_frames[0], core)
                 };
-                dst_frames.emplace_back(frame);
-                dst_ptrs.emplace_back(vsapi->getWritePtr(frame, 0));
+                resource.dst_frames.emplace_back(frame);
+                resource.dst_ptrs.emplace_back(vsapi->getWritePtr(frame, 0));
             }
         }
-
-        auto h_scale = dst_tile_h / src_tile_h;
-        auto w_scale = dst_tile_w / src_tile_w;
 
         const auto set_error = [&](const std::string& error_message) {
             vsapi->setFilterError((__func__ + ": "s + error_message).c_str(), frameCtx);
 
             vsapi->freeFrame(dst_frame);
 
-            for (const auto& frame : dst_frames) {
+            for (const auto& frame : resource.dst_frames) {
                 vsapi->freeFrame(frame);
             }
 
-            for (const auto& frame : src_frames) {
+            for (const auto& frame : resource.src_frames) {
                 vsapi->freeFrame(frame);
             }
 
             return nullptr;
         };
 
-        int ticket = d->acquire();
-        TicketGuard ticket_guard{d, ticket};
-        auto& resource = d->resources[ticket];
-
         auto pack_tile = [&](ov::InferRequest& req, const TileDesc& tile) {
             auto input_buffer = (uint8_t*)req.get_input_tensor().data<float>();
 
-            for (const auto& _src_ptr : src_ptrs) {
-                const uint8_t* src_ptr{_src_ptr + tile.y * src_stride + tile.x * src_bytes};
+            for (const auto& _src_ptr : resource.src_ptrs) {
+                const uint8_t* src_ptr{_src_ptr + tile.y * src_stride + tile.x * 4};
 
-                if (src_tile_w_bytes == src_stride) {
-                    std::memcpy(input_buffer, src_ptr, src_tile_bytes);
+                if (d->in_tile_w_bytes == src_stride) {
+                    std::memcpy(input_buffer, src_ptr, d->in_tile_bytes);
                 } else {
-                    vsh::bitblt(input_buffer, src_tile_w_bytes, src_ptr, src_stride, src_tile_w_bytes, src_tile_h);
+                    vsh::bitblt(input_buffer, d->in_tile_w_bytes, src_ptr, src_stride, d->in_tile_w_bytes, d->in_tile_h);
                 }
 
-                input_buffer += src_tile_bytes;
+                input_buffer += d->in_tile_bytes;
             }
         };
 
         auto unpack_tile = [&](ov::InferRequest& req, const TileDesc& tile) {
             auto output_buffer = (const uint8_t*)req.get_output_tensor().data<float>();
 
-            for (int plane = 0; plane < dst_planes; ++plane) {
-                uint8_t* dst_ptr = (dst_ptrs[plane] + h_scale * tile.y * dst_stride + w_scale * tile.x * dst_bytes);
+            for (int plane = 0; plane < d->out_tile_c; ++plane) {
+                uint8_t* dst_ptr = (resource.dst_ptrs[plane] + d->h_scale * tile.y * dst_stride + d->w_scale * tile.x * 4);
 
-                if (tile.x_crop_start == 0 && tile.x_crop_end == 0 && tile.y_crop_start == 0 && tile.y_crop_end == 0 && dst_tile_w_bytes == dst_stride) {
-                    std::memcpy(dst_ptr, output_buffer, dst_tile_bytes);
+                if (tile.x_crop_start == 0 && tile.x_crop_end == 0 && tile.y_crop_start == 0 && tile.y_crop_end == 0 && d->out_tile_w_bytes == dst_stride) {
+                    std::memcpy(dst_ptr, output_buffer, d->out_tile_bytes);
                 } else {
                     vsh::bitblt(
-                        dst_ptr + (tile.y_crop_start * dst_stride + tile.x_crop_start * dst_bytes),
+                        dst_ptr + (tile.y_crop_start * dst_stride + tile.x_crop_start * 4),
                         dst_stride,
-                        output_buffer + (tile.y_crop_start * dst_tile_w_bytes + tile.x_crop_start * dst_bytes),
-                        dst_tile_w_bytes,
-                        dst_tile_w_bytes - (tile.x_crop_start + tile.x_crop_end) * dst_bytes,
-                        dst_tile_h - (tile.y_crop_start + tile.y_crop_end)
+                        output_buffer + (tile.y_crop_start * d->out_tile_w_bytes + tile.x_crop_start * 4),
+                        d->out_tile_w_bytes,
+                        d->out_tile_w_bytes - (tile.x_crop_start + tile.x_crop_end) * 4,
+                        d->out_tile_h - (tile.y_crop_start + tile.y_crop_end)
                     );
                 }
 
-                output_buffer += dst_tile_bytes;
+                output_buffer += d->out_tile_bytes;
             }
         };
 
@@ -515,17 +499,17 @@ static const VSFrame* VS_CC vsOvGetFrame(
             }
         }
 
-        for (const auto& frame : src_frames) {
+        for (const auto& frame : resource.src_frames) {
             vsapi->freeFrame(frame);
         }
 
         if (!d->flexible_output_prop.empty()) {
             auto prop = vsapi->getFramePropertiesRW(dst_frame);
 
-            for (int i = 0; i < dst_planes; i++) {
+            for (int i = 0; i < d->out_tile_c; i++) {
                 auto key{d->flexible_output_prop + std::to_string(i)};
-                vsapi->mapSetFrame(prop, key.c_str(), dst_frames[i], maReplace);
-                vsapi->freeFrame(dst_frames[i]);
+                vsapi->mapSetFrame(prop, key.c_str(), resource.dst_frames[i], maReplace);
+                vsapi->freeFrame(resource.dst_frames[i]);
             }
         }
 
@@ -573,17 +557,16 @@ static void VS_CC vsOvCreate(const VSMap* in, VSMap* out, void* userData, VSCore
         }
     };
 
-    std::vector<const VSVideoInfo*> in_vis;
-    in_vis.reserve(std::size(d->nodes));
+    d->in_vis.reserve(std::size(d->nodes));
     for (const auto& node : d->nodes) {
-        in_vis.emplace_back(vsapi->getVideoInfo(node));
+        d->in_vis.emplace_back(vsapi->getVideoInfo(node));
     }
 
-    if (auto err = checkNodes(in_vis); err.has_value()) {
+    if (auto err = checkNodes(d->in_vis); err.has_value()) {
         return set_error(err.value());
     }
 
-    d->out_vi = std::make_unique<VSVideoInfo>(*in_vis.front()); // mutable
+    d->out_vi = std::make_unique<VSVideoInfo>(*d->in_vis.front()); // mutable
 
     int error;
 
@@ -620,15 +603,15 @@ static void VS_CC vsOvCreate(const VSMap* in, VSMap* out, void* userData, VSCore
         }
 
         // set tile size to video dimensions
-        tile_w = in_vis.front()->width;
-        tile_h = in_vis.front()->height;
+        tile_w = d->in_vis.front()->width;
+        tile_h = d->in_vis.front()->height;
     }
     if (tile_w - 2 * d->overlap_w <= 0 || tile_h - 2 * d->overlap_h <= 0) {
         return set_error("\"overlap\" too large");
     }
 
     d->tile_grid =
-        generateTiles(in_vis.front()->width, in_vis.front()->height, tile_w, tile_h, d->overlap_w, d->overlap_h);
+        generateTiles(d->in_vis.front()->width, d->in_vis.front()->height, tile_w, tile_h, d->overlap_w, d->overlap_h);
 
     d->num_streams = vsapi->mapGetInt(in, "num_streams", 0, &error);
     if (error || d->num_streams <= 0) {
@@ -761,11 +744,28 @@ static void VS_CC vsOvCreate(const VSMap* in, VSMap* out, void* userData, VSCore
             return set_error(e.what());
         }
 
-        if (auto err = checkNodesAndNetwork(d->executable_network, in_vis); err.has_value()) {
+        if (auto err = checkNodesAndNetwork(d->executable_network, d->in_vis); err.has_value()) {
             return set_error(err.value());
         }
 
         setDimensions(d->out_vi, d->executable_network, core, vsapi, !d->flexible_output_prop.empty());
+
+        auto src_tile_shape = getShape(d->executable_network, true);
+        d->in_tile_c = src_tile_shape[1];
+        d->in_tile_h = src_tile_shape[2];
+        d->in_tile_w = src_tile_shape[3];
+        d->in_tile_w_bytes = d->in_tile_w * 4;
+        d->in_tile_bytes = d->in_tile_h * d->in_tile_w_bytes;
+
+        auto dst_tile_shape = getShape(d->executable_network, false);
+        d->out_tile_c = dst_tile_shape[1];
+        d->out_tile_h = dst_tile_shape[2];
+        d->out_tile_w = dst_tile_shape[3];
+        d->out_tile_w_bytes = d->out_tile_w * 4;
+        d->out_tile_bytes = d->out_tile_h * d->out_tile_w_bytes;
+
+        d->h_scale = d->out_tile_h / d->in_tile_h;
+        d->w_scale = d->out_tile_w / d->in_tile_w;
 
         d->semaphore.init(d->num_streams);
         d->tickets.resize(d->num_streams);
@@ -774,10 +774,17 @@ static void VS_CC vsOvCreate(const VSMap* in, VSMap* out, void* userData, VSCore
         d->resources.reserve(d->num_streams);
         for (int i = 0; i < d->num_streams; ++i) {
             try {
-                d->resources.push_back(Resource{
+                Resource res{
                     {d->executable_network.create_infer_request(),
                      d->executable_network.create_infer_request()}
-                });
+                };
+                res.src_frames.reserve(d->nodes.size());
+                res.src_ptrs.reserve(d->in_tile_c);
+                res.dst_ptrs.reserve(d->out_tile_c);
+                if (!d->flexible_output_prop.empty()) {
+                    res.dst_frames.reserve(d->out_tile_c);
+                }
+                d->resources.push_back(std::move(res));
             } catch (const ov::Exception& e) {
                 return set_error("[OV exception] Create inference request: "s + e.what());
             } catch (const std::exception& e) {
