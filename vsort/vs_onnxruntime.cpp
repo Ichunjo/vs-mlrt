@@ -694,7 +694,20 @@ static const VSFrame* VS_CC vsOrtGetFrame(
                     input_buffer += src_tile_bytes;
                 }
 
-                checkError(ortapi->RunWithBinding(resource.session, resource.run_options, resource.binding));
+                if (d->backend == Backend::CPU) {
+                    checkError(ortapi->RunWithBinding(resource.session, resource.run_options, resource.binding));
+                } else {
+                    checkError(ortapi->Run(
+                        resource.session,
+                        resource.run_options,
+                        &resource.input_name,
+                        &resource.input_tensor,
+                        1,
+                        &resource.output_name,
+                        1,
+                        &resource.output_tensor
+                    ));
+                }
 
                 uint8_t* output_buffer;
                 checkError(
@@ -1304,9 +1317,11 @@ static void VS_CC vsOrtCreate(const VSMap* in, VSMap* out, void* userData, VSCor
                 &resource.output_tensor
             ));
 
-            checkError(ortapi->CreateIoBinding(resource.session, &resource.binding));
-            checkError(ortapi->BindInput(resource.binding, resource.input_name, resource.input_tensor));
-            checkError(ortapi->BindOutput(resource.binding, resource.output_name, resource.output_tensor));
+            if (d->backend == Backend::CPU) {
+                checkError(ortapi->CreateIoBinding(resource.session, &resource.binding));
+                checkError(ortapi->BindInput(resource.binding, resource.input_name, resource.input_tensor));
+                checkError(ortapi->BindOutput(resource.binding, resource.output_name, resource.output_tensor));
+            }
 
             checkError(ortapi->CreateRunOptions(&resource.run_options));
         }
