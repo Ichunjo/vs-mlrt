@@ -1,3 +1,4 @@
+#define VS_USE_API_43
 #include <NvInferRuntime.h>
 #include <VSConstants4.h>
 #include <VSHelper4.h>
@@ -89,6 +90,9 @@ struct vsTrtData {
     bool use_cuda_graph;
     int overlap_w, overlap_h;
 
+    GPUMemoryAccounting memory;
+    std::unique_ptr<GPUInterop> gpu;
+
     std::unique_ptr<nvinfer1::IRuntime> runtime;
     std::vector<std::unique_ptr<nvinfer1::ICudaEngine>> engines;
 
@@ -96,6 +100,8 @@ struct vsTrtData {
     std::vector<int> tickets;
     std::mutex instances_lock;
     std::vector<InferenceInstance> instances;
+
+    std::vector<std::unique_ptr<GPUStream>> gpu_streams;
 
     std::string flexible_output_prop;
 
@@ -120,6 +126,103 @@ struct vsTrtData {
     }
 };
 
+static const VSFrame*
+vsTrtGetGPUFrame(int n, vsTrtData* d, VSFrameContext* frameCtx, VSCore* core, const VSAPI* vsapi) noexcept {
+    int ticket = d->acquire();
+    auto& instance = d->instances[ticket];
+    auto& stream = *d->gpu_streams[ticket];
+    auto resources = std::make_unique<GPUFrameResources>();
+    resources->vsapi = vsapi;
+    std::vector<VSFrame*> outputs;
+    auto set_error = [&](const std::string& error) -> const VSFrame* {
+        // errors can follow a partial enqueue. drain before releasing any touched frame or import.
+        cudaStreamSynchronize(instance.stream);
+        for (auto frame : outputs)
+            vsapi->freeFrame(frame);
+        resources.reset();
+        d->release(ticket);
+        vsapi->setFilterError(("vstrt: " + error).c_str(), frameCtx);
+        return nullptr;
+    };
+    auto status = cudaSetDevice(d->device_id);
+    if (status != cudaSuccess)
+        return set_error(cudaGetErrorString(status));
+    if (auto err = stream.reap())
+        return set_error(*err);
+    char error[512]{};
+    for (auto it = d->nodes.begin(); it != d->nodes.end(); ++it) {
+        // exportable acquisition consumes a request, reuse it for repeated clip arguments.
+        auto previous = std::find(d->nodes.begin(), it, *it);
+        auto frame = previous == it ? d->gpu->vkapi->getExportableFrameFilter(n, *it, frameCtx, error, sizeof(error))
+                                    : vsapi->addFrameRef(resources->frames[previous - d->nodes.begin()]);
+        if (!frame)
+            return set_error(error);
+        resources->frames.push_back(frame);
+    }
+    if (auto err = stream.waitInputs(*resources))
+        return set_error(*err);
+    auto allocate = [&]() {
+        return d->gpu->vkapi->newGPUVideoFrame(
+            &d->out_vi->format, d->out_vi->width, d->out_vi->height, resources->frames[0], core
+        );
+    };
+    auto dst_frame = allocate();
+    outputs.push_back(dst_frame);
+    auto src_dim = instance.exec_context->getTensorShape(d->engines[0]->getIOTensorName(0));
+    auto dst_dim = instance.exec_context->getTensorShape(d->engines[0]->getIOTensorName(1));
+    std::vector<const uint8_t*> src;
+    std::vector<uint8_t*> dst;
+    for (auto frame : resources->frames) {
+        for (int p = 0; p < vsapi->getVideoFrameFormat(frame)->numPlanes; ++p) {
+            uint8_t* plane{};
+            if (auto err = d->gpu->mapPlane(frame, p, plane, *resources))
+                return set_error(*err);
+            src.push_back(plane);
+        }
+    }
+    for (int p = 0; p < dst_dim.d[1]; ++p) {
+        auto frame = dst_frame;
+        int plane_index = p;
+        if (!d->flexible_output_prop.empty()) {
+            frame = allocate();
+            outputs.push_back(frame);
+            plane_index = 0;
+        }
+        uint8_t* plane{};
+        if (auto err = d->gpu->mapPlane(frame, plane_index, plane, *resources))
+            return set_error(*err);
+        dst.push_back(plane);
+    }
+    IOInfo info{
+        .in =
+            {vsapi->getFrameWidth(resources->frames[0], 0),
+             vsapi->getFrameHeight(resources->frames[0], 0),
+             vsapi->getStride(resources->frames[0], 0),
+             vsapi->getVideoFrameFormat(resources->frames[0])->bytesPerSample,
+             static_cast<int>(src_dim.d[3]),
+             static_cast<int>(src_dim.d[2])},
+        .out = {vsapi->getStride(dst_frame, 0), d->out_vi->format.bytesPerSample},
+        .w_scale = static_cast<int>(dst_dim.d[3] / src_dim.d[3]),
+        .h_scale = static_cast<int>(dst_dim.d[2] / src_dim.d[2]),
+        .overlap_w = d->overlap_w,
+        .overlap_h = d->overlap_h
+    };
+    if (auto err = inference(instance, d->device_id, d->use_cuda_graph, info, src, dst, true))
+        return set_error(*err);
+    if (auto err = stream.finish(resources, outputs))
+        return set_error(*err);
+    if (!d->flexible_output_prop.empty()) {
+        auto prop = vsapi->getFramePropertiesRW(dst_frame);
+        for (size_t p = 1; p < outputs.size(); ++p) {
+            auto key = d->flexible_output_prop + std::to_string(p - 1);
+            vsapi->mapConsumeFrame(prop, key.c_str(), outputs[p], maReplace);
+        }
+    }
+    resources.reset();
+    d->release(ticket);
+    return dst_frame;
+}
+
 static const VSFrame* VS_CC vsTrtGetFrame(
     int n,
     int activationReason,
@@ -137,6 +240,8 @@ static const VSFrame* VS_CC vsTrtGetFrame(
             vsapi->requestFrameFilter(n, node, frameCtx);
         }
     } else if (activationReason == arAllFramesReady) {
+        if (d->gpu)
+            return vsTrtGetGPUFrame(n, d, frameCtx, core, vsapi);
         const std::vector<const VSVideoInfo*> in_vis{getVideoInfo(vsapi, d->nodes)};
 
         const std::vector<const VSFrame*> src_frames{getFrames(n, vsapi, frameCtx, d->nodes)};
@@ -278,6 +383,16 @@ static void VS_CC vsTrtCreate(const VSMap* in, VSMap* out, void* userData, VSCor
         }
     };
 
+    VSCoreInfo core_info{};
+    vsapi->getCoreInfo(core, &core_info);
+    if (core_info.core < 81)
+        return set_error("VapourSynth R81 or newer is required");
+    const int residency = vsapi->getNodeResidency(d->nodes[0]);
+    for (auto node : d->nodes) {
+        if (vsapi->getNodeResidency(node) != residency)
+            return set_error("all clips must have the same residency, mixed CPU/GPU inputs are not supported");
+    }
+
     const char* engine_path = vsapi->mapGetData(in, "engine_path", 0, nullptr);
 
     std::vector<const VSVideoInfo*> in_vis;
@@ -337,8 +452,34 @@ static void VS_CC vsTrtCreate(const VSMap* in, VSMap* out, void* userData, VSCor
     int error;
 
     int device_id = vsapi->mapGetIntSaturated(in, "device_id", 0, &error);
-    if (error) {
-        device_id = 0;
+    const bool automatic_device = error;
+
+    if (residency == nrGPU) {
+        if (!automatic_device)
+            return set_error("device_id must be omitted/None for GPU inputs, select the GPU through VapourSynth");
+        d->gpu = std::make_unique<GPUInterop>(vsapi, core);
+        if (auto err = d->gpu->init(device_id))
+            return set_error(*err);
+    } else if (automatic_device) {
+        VSVulkanCoreInfo info{};
+        char vulkan_error[512]{};
+        const bool have_vulkan =
+            !vsapi->getVulkanAPI()->getVulkanCoreInfo(core, &info, vulkan_error, sizeof(vulkan_error));
+        if (auto err = selectCUDADevice(have_vulkan ? &info : nullptr, device_id, false))
+            return set_error(*err);
+        cudaDeviceProp prop{};
+        checkError(cudaGetDeviceProperties(&prop, device_id));
+        if (!have_vulkan || std::memcmp(prop.uuid.bytes, info.deviceUUID, VK_UUID_SIZE)) {
+            auto reason = have_vulkan ? "VapourSynth device \""s + info.deviceName + "\" does not match a CUDA device"
+                                      : "Vulkan is unavailable"s;
+            vsapi->logMessage(
+                mtInformation,
+                ("vstrt: automatic device selection: using CUDA device "s + std::to_string(device_id) + " (" +
+                 prop.name + "); " + reason)
+                    .c_str(),
+                core
+            );
+        }
     }
 
     int device_count;
@@ -349,6 +490,7 @@ static void VS_CC vsTrtCreate(const VSMap* in, VSMap* out, void* userData, VSCor
         return set_error("invalid device ID (" + std::to_string(device_id) + ")");
     }
     d->device_id = device_id;
+    d->memory.init(vsapi, core, device_id);
 
     d->use_cuda_graph = !!vsapi->mapGetInt(in, "use_cuda_graph", 0, &error);
     if (error) {
@@ -444,6 +586,8 @@ static void VS_CC vsTrtCreate(const VSMap* in, VSMap* out, void* userData, VSCor
     } else {
         return set_error(std::get<ErrorMessage>(maybe_engine));
     }
+    auto weights = d->engines[0]->getEngineStat(nvinfer1::EngineStat::kTOTAL_WEIGHTS_SIZE);
+    d->memory.reserve(static_cast<size_t>(std::max<int64_t>(weights, 0)));
 
     auto maybe_profile_index = selectProfile(d->engines[0], tile_size);
 
@@ -462,7 +606,7 @@ static void VS_CC vsTrtCreate(const VSMap* in, VSMap* out, void* userData, VSCor
     d->instances.reserve(d->num_streams);
     for (int i = 0; i < d->num_streams; ++i) {
         auto maybe_instance =
-            getInstance(d->engines.back(), maybe_profile_index, tile_size, d->use_cuda_graph, is_dynamic);
+        	getInstance(d->engines.back(), maybe_profile_index, tile_size, d->use_cuda_graph, is_dynamic, d->memory, !!d->gpu);
 
         if (std::holds_alternative<InferenceInstance>(maybe_instance)) {
             auto instance = std::move(std::get<InferenceInstance>(maybe_instance));
@@ -470,6 +614,12 @@ static void VS_CC vsTrtCreate(const VSMap* in, VSMap* out, void* userData, VSCor
                 return set_error(err.value());
             }
             d->instances.emplace_back(std::move(instance));
+            if (d->gpu) {
+                auto stream = std::make_unique<GPUStream>(*d->gpu, d->instances.back().stream);
+                if (auto err = stream->init())
+                    return set_error(*err);
+                d->gpu_streams.push_back(std::move(stream));
+            }
         } else {
             return set_error(std::get<ErrorMessage>(maybe_instance));
         }
@@ -538,19 +688,20 @@ static void VS_CC vsTrtCreate(const VSMap* in, VSMap* out, void* userData, VSCor
     std::vector<VSFilterDependency> deps;
     deps.reserve(d->nodes.size());
     for (auto* node : d->nodes) {
-        deps.push_back({node, rpGeneral});
+        deps.push_back({node, d->gpu ? rpStrictSpatial : rpGeneral});
     }
 
     auto* out_vi = d->out_vi.get();
     auto* instance_data = d.release();
 
-    vsapi->createVideoFilter(
+    vsapi->createVideoFilterEx(
         out,
         "Model",
         out_vi,
         vsTrtGetFrame,
         vsTrtFree,
         fmParallel,
+        instance_data->gpu ? ffGPUOutput : 0,
         deps.data(),
         static_cast<int>(deps.size()),
         instance_data,
@@ -608,7 +759,7 @@ VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI* vspapi) {
 
     vspapi->registerFunction(
         "Model",
-        "clips:vnode[];"
+        "clips:vnode[]:all;"
         "engine_path:data;"
         "overlap:int[]:opt;"
         "tilesize:int[]:opt;"
@@ -625,6 +776,7 @@ VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI* vspapi) {
 
     auto getVersion = [](const VSMap*, VSMap* out, void*, VSCore* core, const VSAPI* vsapi) {
         vsapi->mapSetData(out, "version", PLUGIN_VERSION_STRING, -1, dtUtf8, maReplace);
+        vsapi->mapSetInt(out, "gpu_io", 1, maReplace);
 
         vsapi->mapSetData(out, "tensorrt_version", std::to_string(getInferLibVersion()).c_str(), -1, dtUtf8, maReplace);
 

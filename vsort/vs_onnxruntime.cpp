@@ -1435,6 +1435,7 @@ VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI* vspapi) {
 
     auto getVersion = [](const VSMap*, VSMap* out, void*, VSCore* core, const VSAPI* vsapi) {
         vsapi->mapSetData(out, "version", PLUGIN_VERSION_STRING, -1, dtUtf8, maReplace);
+        vsapi->mapSetInt(out, "gpu_io", 0, maReplace);
         vsapi->mapSetData(
             out, "onnxruntime_api_version_build", std::to_string(ORT_API_VERSION).c_str(), -1, dtUtf8, maReplace
         );
