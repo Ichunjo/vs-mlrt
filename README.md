@@ -9,6 +9,10 @@ This project provides VapourSynth ML filter runtimes for a variety of platforms:
 
 Please refer to [the wiki](https://github.com/AmusementClub/vs-mlrt/wiki) for supported models & usage information.
 
+## Installation and Compilation
+
+This repository only stores the source code. For compilation scripts and installation instructions, visit the [vs-wheels](https://github.com/Jaded-Encoding-Thaumaturgy/vs-wheels/tree/master/vsmlrt) repository.
+
 ## vsov: OpenVINO-based Pure CPU & Intel GPU Runtime
 
 [OpenVINO](https://docs.openvino.ai/latest/index.html) is an AI inference runtime developed
