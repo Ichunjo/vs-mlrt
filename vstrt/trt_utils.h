@@ -14,6 +14,7 @@
 
 #include "cuda_helper.h"
 #include "cuda_utils.h"
+#include "gpu_helper.h"
 
 using ErrorMessage = std::string;
 
@@ -251,10 +252,13 @@ static inline std::variant<ErrorMessage, InferenceInstance> getInstance(
     const std::optional<int>& profile_index,
     const TileSize& tile_size,
     bool use_cuda_graph,
-    bool is_dynamic
+    bool is_dynamic,
+    GPUMemoryAccounting& memory,
+    bool gpu_input
 ) noexcept {
 
     const auto set_error = [](const ErrorMessage& error_message) { return error_message; };
+    const size_t num_buffers = gpu_input ? 1 : kNumBuffers;
 
     StreamResource stream{};
     checkError(cudaStreamCreateWithFlags(&stream.data, cudaStreamNonBlocking));
@@ -274,6 +278,8 @@ static inline std::variant<ErrorMessage, InferenceInstance> getInstance(
         checkError(cudaEventCreateWithFlags(&d2h_done[b].data, cudaEventDisableTiming));
     }
 
+    if (!is_dynamic)
+        memory.reserve(engine->getDeviceMemorySizeV2());
     auto exec_context = std::unique_ptr<nvinfer1::IExecutionContext>(engine->createExecutionContext(
         is_dynamic ? nvinfer1::ExecutionContextAllocationStrategy::kUSER_MANAGED
                    : nvinfer1::ExecutionContextAllocationStrategy::kON_PROFILE_CHANGE
@@ -324,12 +330,15 @@ static inline std::variant<ErrorMessage, InferenceInstance> getInstance(
 
         auto size = getSize(dim) * getBytesPerSample(type);
 
-        for (size_t b = 0; b < kNumBuffers; ++b) {
+        memory.reserve(size * num_buffers);
+
+        for (size_t b = 0; b < num_buffers; ++b) {
             Resource<uint8_t*, cudaFree> d_data{};
             checkError(cudaMalloc(&d_data.data, size));
 
             Resource<uint8_t*, cudaFreeHost> h_data{};
-            checkError(cudaMallocHost(&h_data.data, size, cudaHostAllocWriteCombined));
+            if (!gpu_input)
+                checkError(cudaMallocHost(&h_data.data, size, cudaHostAllocWriteCombined));
 
             src[b] = MemoryResource{.h_data = std::move(h_data), .d_data = std::move(d_data), .size = size};
         }
@@ -342,12 +351,15 @@ static inline std::variant<ErrorMessage, InferenceInstance> getInstance(
 
         auto size = getSize(dim) * getBytesPerSample(type);
 
-        for (size_t b = 0; b < kNumBuffers; ++b) {
+        memory.reserve(size * num_buffers);
+
+        for (size_t b = 0; b < num_buffers; ++b) {
             Resource<uint8_t*, cudaFree> d_data{};
             checkError(cudaMalloc(&d_data.data, size));
 
             Resource<uint8_t*, cudaFreeHost> h_data{};
-            checkError(cudaMallocHost(&h_data.data, size));
+            if (!gpu_input)
+                checkError(cudaMallocHost(&h_data.data, size));
 
             dst[b] = MemoryResource{.h_data = std::move(h_data), .d_data = std::move(d_data), .size = size};
         }
@@ -360,14 +372,14 @@ static inline std::variant<ErrorMessage, InferenceInstance> getInstance(
         if (buffer_size == 0) {
             return set_error("failed to get internal activation buffer size");
         }
-
+        memory.reserve(buffer_size);
         checkError(cudaMalloc(&d_context_allocation.data, buffer_size));
         exec_context->setDeviceMemoryV2(d_context_allocation.data, static_cast<int64_t>(buffer_size));
     }
 
     std::array<GraphExecResource, kNumBuffers> graphexec{};
     if (use_cuda_graph) {
-        for (size_t b = 0; b < kNumBuffers; ++b) {
+        for (size_t b = 0; b < num_buffers; ++b) {
             auto result = getGraphExec(src[b], dst[b], exec_context, stream);
             if (std::holds_alternative<GraphExecResource>(result)) {
                 graphexec[b] = std::move(std::get<GraphExecResource>(result));

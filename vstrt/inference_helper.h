@@ -40,7 +40,8 @@ static inline std::optional<ErrorMessage> inference(
     bool use_cuda_graph,
     const IOInfo& info,
     const std::vector<const uint8_t*>& src_ptrs,
-    const std::vector<uint8_t*>& dst_ptrs
+    const std::vector<uint8_t*>& dst_ptrs,
+    bool gpu_input = false
 ) noexcept {
 
     const auto set_error = [](const ErrorMessage& error_message) { return error_message; };
@@ -53,6 +54,20 @@ static inline std::optional<ErrorMessage> inference(
     int dst_tile_h = info.in.tile_h * info.h_scale;
     int dst_tile_w_bytes = dst_tile_w * info.out.bytes_per_sample;
     int dst_tile_bytes = dst_tile_h * dst_tile_w * info.out.bytes_per_sample;
+
+    const size_t num_buffers = gpu_input ? 1 : kNumBuffers;
+
+    auto copy_plane =
+        [&](
+            uint8_t* dst, ptrdiff_t dst_pitch, const uint8_t* src, ptrdiff_t src_pitch, size_t width, size_t height
+        ) -> cudaError_t {
+        if (gpu_input)
+            return cudaMemcpy2DAsync(
+                dst, dst_pitch, src, src_pitch, width, height, cudaMemcpyDeviceToDevice, instance.stream
+            );
+        vsh::bitblt(dst, dst_pitch, src, src_pitch, width, height);
+        return cudaSuccess;
+    };
 
     int step_w = info.in.tile_w - 2 * info.overlap_w;
     int step_h = info.in.tile_h - 2 * info.overlap_h;
@@ -95,26 +110,34 @@ static inline std::optional<ErrorMessage> inference(
         return {};
     }
 
-    auto pack_tile = [&](size_t tile_idx, int b) -> void {
+    auto pack_tile = [&](size_t tile_idx, int b) -> std::optional<ErrorMessage> {
         const auto& tile = tiles[tile_idx];
-        uint8_t* h_data = instance.src[b].h_data.data;
+        uint8_t* h_data = gpu_input ? instance.src[b].d_data.data : instance.src[b].h_data.data;
         for (const uint8_t* _src_ptr : src_ptrs) {
             const uint8_t* src_ptr{_src_ptr + tile.y * info.in.pitch + tile.x * info.in.bytes_per_sample};
 
-            vsh::bitblt(
+            checkError(copy_plane(
                 h_data,
                 src_tile_w_bytes,
                 src_ptr,
                 info.in.pitch,
                 static_cast<size_t>(src_tile_w_bytes),
                 static_cast<size_t>(info.in.tile_h)
-            );
+            ));
 
             h_data += src_tile_bytes;
         }
+        return {};
     };
 
     auto launch_tile = [&](int b) -> std::optional<ErrorMessage> {
+        if (gpu_input) {
+            if (!use_cuda_graph)
+                return enqueueCompute(instance.src[b], instance.dst[b], instance.exec_context, instance.stream);
+            checkError(cudaGraphLaunch(instance.graphexec[b], instance.stream));
+            return {};
+        }
+
         // 1. Host-to-Device transfer on h2d_stream
         checkError(cudaMemcpyAsync(
             instance.src[b].d_data,
@@ -157,15 +180,16 @@ static inline std::optional<ErrorMessage> inference(
 
     auto unpack_tile = [&](size_t tile_idx, int b) -> std::optional<ErrorMessage> {
         const auto& tile = tiles[tile_idx];
-        checkError(cudaEventSynchronize(instance.d2h_done[b]));
+        if (!gpu_input)
+            checkError(cudaEventSynchronize(instance.d2h_done[b]));
 
-        const uint8_t* h_data = instance.dst[b].h_data.data;
+        const uint8_t* h_data = gpu_input ? instance.dst[b].d_data.data : instance.dst[b].h_data.data;
         for (uint8_t* _dst_ptr : dst_ptrs) {
             uint8_t* dst_ptr{
                 _dst_ptr + info.h_scale * tile.y * info.out.pitch + info.w_scale * tile.x * info.out.bytes_per_sample
             };
 
-            vsh::bitblt(
+            checkError(copy_plane(
                 dst_ptr + (tile.y_crop_start * info.out.pitch + tile.x_crop_start * info.out.bytes_per_sample),
                 info.out.pitch,
                 h_data + (tile.y_crop_start * dst_tile_w_bytes + tile.x_crop_start * info.out.bytes_per_sample),
@@ -174,7 +198,7 @@ static inline std::optional<ErrorMessage> inference(
                     dst_tile_w_bytes - (tile.x_crop_start + tile.x_crop_end) * info.out.bytes_per_sample
                 ),
                 static_cast<size_t>(dst_tile_h - (tile.y_crop_start + tile.y_crop_end))
-            );
+            ));
 
             h_data += dst_tile_bytes;
         }
@@ -183,23 +207,25 @@ static inline std::optional<ErrorMessage> inference(
     };
 
     for (size_t i = 0; i < tiles.size(); ++i) {
-        int b = static_cast<int>(i % kNumBuffers);
-        if (i >= kNumBuffers) {
-            if (auto err = unpack_tile(i - kNumBuffers, b); err.has_value()) {
+        int b = static_cast<int>(i % num_buffers);
+        if (i >= num_buffers) {
+            if (auto err = unpack_tile(i - num_buffers, b); err.has_value()) {
                 return err;
             }
         }
-        pack_tile(i, b);
+        if (auto err = pack_tile(i, b); err.has_value()) {
+            return err;
+        }
         if (auto err = launch_tile(b); err.has_value()) {
             return err;
         }
     }
 
     // Drain remaining in-flight tiles
-    size_t in_flight = std::min(tiles.size(), kNumBuffers);
+    size_t in_flight = std::min(tiles.size(), num_buffers);
     for (size_t k = in_flight; k > 0; --k) {
         size_t tile_idx = tiles.size() - k;
-        int b = static_cast<int>(tile_idx % kNumBuffers);
+        int b = static_cast<int>(tile_idx % num_buffers);
         if (auto err = unpack_tile(tile_idx, b); err.has_value()) {
             return err;
         }

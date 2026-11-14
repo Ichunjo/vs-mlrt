@@ -1109,6 +1109,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
 
     auto getVersion = [](const VSMap*, VSMap* out, void*, VSCore* core, const VSAPI* vsapi) {
         vsapi->mapSetData(out, "version", PLUGIN_VERSION_STRING, -1, dtUtf8, maReplace);
+        vsapi->mapSetInt(out, "gpu_io", 0, maReplace);
 
 #ifndef NO_MIGX_VERSION
         vsapi->mapSetData(
